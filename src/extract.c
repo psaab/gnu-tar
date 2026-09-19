@@ -40,6 +40,13 @@ static mode_t current_umask;	/* current umask (which is set to 0 if -p) */
 
 static mode_t const all_mode_bits = ~ (mode_t) 0;
 
+#if TAR_PARALLEL
+/* Accessors for parallel.c.  */
+mode_t parallel_current_umask (void) { return current_umask; }
+mode_t parallel_newdir_umask (void) { return newdir_umask; }
+bool parallel_we_are_root (void) { return we_are_root; }
+#endif
+
 #if ! HAVE_FCHMOD && ! defined fchmod
 # define fchmod(fd, mode) (errno = ENOSYS, -1)
 #endif
@@ -73,7 +80,11 @@ implemented (int err)
 }
 
 /* Return true if NAME contains ".." as a file name component.  */
+#if TAR_PARALLEL
+bool
+#else
 static bool
+#endif
 contains_dot_dot (char const *name)
 {
   char const *p = name + FILE_SYSTEM_PREFIX_LEN (name);
@@ -140,6 +151,10 @@ struct delayed_set_stat
     /* Directory that the name is relative to.  */
     idx_t change_dir;
 
+    /* Order of the last metadata update.  Used to keep the latest
+       attributes when different names identify the same directory.  */
+    uintmax_t order;
+
     /* extended attributes*/
     char *cntx_name;
     char *acls_a_ptr;
@@ -153,8 +168,9 @@ struct delayed_set_stat
   };
 
 static struct delayed_set_stat *delayed_set_stat_head;
+static uintmax_t delayed_set_stat_order;
 
-/* Table of delayed stat updates hashed by path; null if none.  */
+/* Table of delayed stat updates hashed by directory and path; null if none.  */
 static Hash_table *delayed_set_stat_table;
 
 /* A link whose creation we have delayed.  */
@@ -245,19 +261,30 @@ static size_t
 ds_hash (void const *entry, size_t table_size)
 {
   struct delayed_set_stat const *ds = entry;
-  return hash_string (ds->file_name, table_size);
+  return (hash_string (ds->file_name, table_size)
+	  ^ (size_t) ds->change_dir) % table_size;
 }
 
 static bool
 ds_compare (void const *a, void const *b)
 {
   struct delayed_set_stat const *dsa = a, *dsb = b;
-  return streq (dsa->file_name, dsb->file_name);
+  return (dsa->change_dir == dsb->change_dir
+	  && streq (dsa->file_name, dsb->file_name));
 }
 
 /*  Set up to extract files.  */
+static void extr_init_1 (void);
+
 void
 extr_init (void)
+{
+  extr_init_1 ();
+  parallel_init ();
+}
+
+static void
+extr_init_1 (void)
 {
   we_are_root = geteuid () == ROOT_UID;
   same_permissions_option += we_are_root;
@@ -418,6 +445,14 @@ check_time (char const *file_name, struct timespec t)
     }
 }
 
+#if TAR_PARALLEL
+void
+parallel_check_time (char const *file_name, struct timespec t)
+{
+  check_time (file_name, t);
+}
+#endif
+
 /* Restore stat attributes (owner, group, mode and times) for
    FILE_NAME, using information given in *ST.
    If FD is nonnegative, it is a file descriptor for the file.
@@ -503,7 +538,7 @@ find_direct_ancestor (char const *file_name)
   struct delayed_set_stat *h = delayed_set_stat_head;
   while (h)
     {
-      if (! h->metadata_set
+      if (h->change_dir == chdir_current && ! h->metadata_set
 	  && strncmp (file_name, h->file_name, h->file_name_len) == 0
 	  && ISSLASH (file_name[h->file_name_len])
 	  && (last_component (file_name + h->file_name_len + 1)
@@ -516,14 +551,22 @@ find_direct_ancestor (char const *file_name)
 
 /* For each entry H in the leading prefix of entries in HEAD that do
    not have metadata_set marked, mark H and fill in its dev and ino
-   members.  Assume HEAD && ! HEAD->metadata_set.  */
+   members.  Ignore entries in a different working directory.
+   Assume HEAD && ! HEAD->metadata_set.  */
 static void
 mark_metadata_set (struct delayed_set_stat *head)
 {
   struct delayed_set_stat *h = head;
+  idx_t change_dir = head->change_dir;
+  idx_t saved_dir = chdir_current;
 
-  do
+  chdir_do (change_dir, false);
+  for (; h; h = h->next)
     {
+      if (h->change_dir != change_dir)
+	continue;
+      if (h != head && h->metadata_set)
+	break;
       struct stat st;
       h->metadata_set = true;
 
@@ -535,7 +578,7 @@ mark_metadata_set (struct delayed_set_stat *head)
 	  h->st_ino = st.st_ino;
 	}
     }
-  while ((h = h->next) && ! h->metadata_set);
+  chdir_do (saved_dir, false);
 }
 
 /* Remember to restore stat attributes (owner, group, mode and times)
@@ -557,9 +600,65 @@ mark_metadata_set (struct delayed_set_stat *head)
        tar --no-recursion -cf archive dir dir/file1 foo dir/file2
 */
 static void
+delay_set_stat_1 (char const *file_name, struct tar_stat_info const *st,
+		  mode_t current_mode, mode_t current_mode_mask,
+		  mode_t mode, int atflag, idx_t change_dir,
+		  struct stat const *real_st);
+
+static void
 delay_set_stat (char const *file_name, struct tar_stat_info const *st,
 		mode_t current_mode, mode_t current_mode_mask,
 		mode_t mode, int atflag)
+{
+  delay_set_stat_1 (file_name, st, current_mode, current_mode_mask,
+		    mode, atflag, chdir_current, NULL);
+}
+
+#if TAR_PARALLEL
+/* Record a directory created by the parallel engine.  ST is null for
+   intermediate directories not mentioned in the archive.  REAL_ST, if
+   not null, is the directory's actual status (needed when it replaces
+   an intermediate-directory entry; the engine runs off the main thread
+   and cannot stat relative to the current directory).  */
+void
+parallel_record_directory (char const *file_name, struct stat const *st,
+			   struct timespec atime, struct timespec mtime,
+			   mode_t current_mode, mode_t current_mode_mask,
+			   mode_t mode, int atflag, idx_t change_dir,
+			   struct stat const *real_st)
+{
+  struct tar_stat_info info;
+  memset (&info, 0, sizeof info);
+  if (st)
+    {
+      info.stat = *st;
+      info.atime = atime;
+      info.mtime = mtime;
+      xattr_map_init (&info.xattr_map);
+    }
+  delay_set_stat_1 (file_name, st ? &info : NULL, current_mode,
+		    current_mode_mask, mode, atflag, change_dir, real_st);
+}
+
+/* Is FILE_NAME in CHANGE_DIR recorded as an intermediate directory?  */
+bool
+parallel_dir_is_interdir (char const *file_name, idx_t change_dir)
+{
+  if (! delayed_set_stat_table)
+    return false;
+  struct delayed_set_stat key;
+  key.file_name = (char *) file_name;
+  key.change_dir = change_dir;
+  struct delayed_set_stat *data = hash_lookup (delayed_set_stat_table, &key);
+  return data && data->interdir;
+}
+#endif /* TAR_PARALLEL */
+
+static void
+delay_set_stat_1 (char const *file_name, struct tar_stat_info const *st,
+		  mode_t current_mode, mode_t current_mode_mask,
+		  mode_t mode, int atflag, idx_t change_dir,
+		  struct stat const *real_st)
 {
   idx_t file_name_len = strlen (file_name);
   struct delayed_set_stat *data;
@@ -571,23 +670,32 @@ delay_set_stat (char const *file_name, struct tar_stat_info const *st,
 
   struct delayed_set_stat key;
   key.file_name = (char *) file_name;
+  key.change_dir = change_dir;
 
   data = hash_lookup (delayed_set_stat_table, &key);
   if (data)
     {
       if (data->interdir)
 	{
-	  struct stat real_st;
-	  struct fdbase f = fdbase (data->file_name);
-	  if (f.fd == BADFD
-	      || fstatat (f.fd, f.base, &real_st, data->atflag) < 0)
+	  if (real_st)
 	    {
-	      stat_error (data->file_name);
+	      data->st_dev = real_st->st_dev;
+	      data->st_ino = real_st->st_ino;
 	    }
 	  else
 	    {
-	      data->st_dev = real_st.st_dev;
-	      data->st_ino = real_st.st_ino;
+	      struct stat stbuf;
+	      struct fdbase f = fdbase (data->file_name);
+	      if (f.fd == BADFD
+		  || fstatat (f.fd, f.base, &stbuf, data->atflag) < 0)
+		{
+		  stat_error (data->file_name);
+		}
+	      else
+		{
+		  data->st_dev = stbuf.st_dev;
+		  data->st_ino = stbuf.st_ino;
+		}
 	    }
 	}
     }
@@ -598,6 +706,7 @@ delay_set_stat (char const *file_name, struct tar_stat_info const *st,
       delayed_set_stat_head = data;
       data->file_name_len = file_name_len;
       data->file_name = xstrdup (file_name);
+      data->change_dir = change_dir;
       if (! hash_insert (delayed_set_stat_table, data))
 	xalloc_die ();
       data->metadata_set = false;
@@ -621,7 +730,8 @@ delay_set_stat (char const *file_name, struct tar_stat_info const *st,
   data->current_mode_mask = current_mode_mask;
   data->interdir = ! st;
   data->atflag = atflag;
-  data->change_dir = chdir_current;
+  data->change_dir = change_dir;
+  data->order = ++delayed_set_stat_order;
   data->cntx_name = NULL;
   if (st)
     assign_string_or_null (&data->cntx_name, st->cntx_name);
@@ -663,6 +773,7 @@ update_interdir_set_stat (char const *dir)
       struct delayed_set_stat key, *data;
 
       key.file_name = (char *) dir;
+      key.change_dir = chdir_current;
       data = hash_lookup (delayed_set_stat_table, &key);
       if (data && data->interdir)
 	{
@@ -674,6 +785,7 @@ update_interdir_set_stat (char const *dir)
 	  data->atime = current_stat_info.atime;
 	  data->mtime = current_stat_info.mtime;
 	  data->interdir = false;
+	  data->order = ++delayed_set_stat_order;
 	  return true;
 	}
     }
@@ -691,6 +803,8 @@ repair_delayed_set_stat (char const *dir,
   struct delayed_set_stat *data;
   for (data = delayed_set_stat_head; data; data = data->next)
     {
+      if (data->change_dir != chdir_current)
+	continue;
       struct stat st;
       struct fdbase f = fdbase (data->file_name);
       if (f.fd == BADFD || fstatat (f.fd, f.base, &st, data->atflag) < 0)
@@ -711,6 +825,7 @@ repair_delayed_set_stat (char const *dir,
 	  data->current_mode = st.st_mode;
 	  data->current_mode_mask = all_mode_bits;
 	  data->interdir = false;
+	  data->order = ++delayed_set_stat_order;
 	  return;
 	}
     }
@@ -730,14 +845,14 @@ free_delayed_set_stat (struct delayed_set_stat *data)
   free (data);
 }
 
-void
-remove_delayed_set_stat (const char *fname)
+static void
+remove_delayed_set_stat_1 (char const *fname, idx_t change_dir)
 {
   struct delayed_set_stat *data, *next, *prev = NULL;
   for (data = delayed_set_stat_head; data; data = next)
     {
       next = data->next;
-      if (chdir_current == data->change_dir
+      if (change_dir == data->change_dir
 	  && streq (data->file_name, fname))
 	{
 	  hash_remove (delayed_set_stat_table, data);
@@ -753,6 +868,20 @@ remove_delayed_set_stat (const char *fname)
     }
 }
 
+void
+remove_delayed_set_stat (char const *fname)
+{
+  remove_delayed_set_stat_1 (fname, chdir_current);
+}
+
+#if TAR_PARALLEL
+void
+parallel_forget_directory (char const *fname, idx_t change_dir)
+{
+  remove_delayed_set_stat_1 (fname, change_dir);
+}
+#endif
+
 static void
 fixup_delayed_set_stat (char const *src, char const *dst)
 {
@@ -762,9 +891,29 @@ fixup_delayed_set_stat (char const *src, char const *dst)
       if (chdir_current == data->change_dir
 	  && streq (data->file_name, src))
 	{
+	  if (streq (src, dst))
+	    return;
+	  /* Drop any other entry already named DST, then rename DATA
+	     and rehash it.  */
+	  for (struct delayed_set_stat **p = &delayed_set_stat_head; *p; )
+	    {
+	      struct delayed_set_stat *d = *p;
+	      if (d != data && d->change_dir == chdir_current
+		  && streq (d->file_name, dst))
+		{
+		  *p = d->next;
+		  hash_remove (delayed_set_stat_table, d);
+		  free_delayed_set_stat (d);
+		}
+	      else
+		p = &d->next;
+	    }
+	  hash_remove (delayed_set_stat_table, data);
 	  free (data->file_name);
 	  data->file_name = xstrdup (dst);
 	  data->file_name_len = strlen (dst);
+	  if (! hash_insert (delayed_set_stat_table, data))
+	    xalloc_die ();
 	  return;
 	}
     }
@@ -1106,6 +1255,7 @@ static void
 apply_nonancestor_delayed_set_stat (char const *file_name, bool metadata_set)
 {
   idx_t file_name_len = strlen (file_name);
+  idx_t change_dir = chdir_current;
   bool check_for_renamed_directories = 0;
 
   while (delayed_set_stat_head)
@@ -1119,7 +1269,8 @@ apply_nonancestor_delayed_set_stat (char const *file_name, bool metadata_set)
       check_for_renamed_directories |= data->metadata_set;
 
       if (metadata_set < data->metadata_set
-	  || (data->file_name_len < file_name_len
+	  || (data->change_dir == change_dir
+	      && data->file_name_len < file_name_len
 	      && file_name[data->file_name_len]
 	      && (ISSLASH (file_name[data->file_name_len])
 		  || ISSLASH (file_name[data->file_name_len - 1]))
@@ -1187,6 +1338,16 @@ apply_nonancestor_delayed_set_stat (char const *file_name, bool metadata_set)
    If not root, though, make the directory writeable and searchable at first,
    so that files can be created under it.
 */
+#if TAR_PARALLEL
+static int safe_dir_mode (struct stat const *st);
+
+mode_t
+parallel_safe_dir_mode (struct stat const *st)
+{
+  return safe_dir_mode (st);
+}
+#endif
+
 static int
 safe_dir_mode (struct stat const *st)
 {
@@ -2010,6 +2171,19 @@ extract_archive (void)
   tar_extractor_t fun = prepare_to_extract (current_stat_info.file_name,
 					    typeflag);
   bool ok = false;
+#if TAR_PARALLEL
+  if (fun && parallel_active)
+    {
+      if (parallel_extract_member (current_stat_info.file_name, typeflag))
+	{
+	  skip_member ();
+	  return;
+	}
+      /* Not handled by the engine: extract it the ordinary way, once the
+	 pipeline has gone idle so the two paths cannot race.  */
+      parallel_barrier ();
+    }
+#endif
   if (fun)
     {
       if (one_top_level_dir)
@@ -2141,9 +2315,74 @@ apply_delayed_links (void)
 }
 
 /* Finish the extraction of an archive.  */
+#if TAR_PARALLEL
+/* Apply the delayed directory stats through the parallel engine.
+   Entries flagged metadata_set are left for the sequential pass that
+   follows the delayed links.  */
+static void
+apply_delayed_set_stat_parallel (void)
+{
+  idx_t n = 0;
+  for (struct delayed_set_stat *d = delayed_set_stat_head; d; d = d->next)
+    n += ! d->metadata_set;
+  if (n == 0)
+    return;
+  struct parallel_dirstat *arr = xcalloc (n, sizeof *arr);
+  idx_t i = 0;
+  for (struct delayed_set_stat *d = delayed_set_stat_head; d; d = d->next)
+    if (! d->metadata_set)
+      {
+	arr[i].name = d->file_name;
+	arr[i].change_dir = d->change_dir;
+	arr[i].order = d->order;
+	arr[i].mode = d->mode;
+	arr[i].current_mode = d->current_mode;
+	arr[i].current_mode_mask = d->current_mode_mask;
+	arr[i].uid = d->uid;
+	arr[i].gid = d->gid;
+	arr[i].atime = d->atime;
+	arr[i].mtime = d->mtime;
+	arr[i].interdir = d->interdir;
+	arr[i].atflag = d->atflag;
+	i++;
+      }
+  parallel_apply_dirstats (arr, n);
+  free (arr);
+
+  /* Take the applied entries out of the list and table, keeping the
+     others in order.  As in extract_finish, there is little point to
+     freeing them: extraction is about to end.  */
+  struct delayed_set_stat *kept = NULL;
+  struct delayed_set_stat **tail = &kept;
+  for (struct delayed_set_stat *d = delayed_set_stat_head; d; )
+    {
+      struct delayed_set_stat *next = d->next;
+      if (d->metadata_set)
+	{
+	  d->next = NULL;
+	  *tail = d;
+	  tail = &d->next;
+	}
+      else
+	hash_remove (delayed_set_stat_table, d);
+      d = next;
+    }
+  delayed_set_stat_head = kept;
+}
+#endif /* TAR_PARALLEL */
+
 void
 extract_finish (void)
 {
+#if TAR_PARALLEL
+  if (parallel_active)
+    {
+      parallel_finish ();
+      apply_delayed_set_stat_parallel ();
+      parallel_shutdown ();
+    }
+#endif
+
   /* First, fix the status of ordinary directories that need fixing.  */
   apply_nonancestor_delayed_set_stat ("", false);
 

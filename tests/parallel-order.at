@@ -1,0 +1,258 @@
+# Process this file with autom4te to create testsuite. -*- Autotest -*-
+
+# Test suite for GNU tar.
+# Copyright 2026 Free Software Foundation, Inc.
+
+# This file is part of GNU tar.
+
+# GNU tar is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+# GNU tar is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# A hard link after two members with the same name must refer to the
+# second member, even while that member waits for the first to finish.
+
+AT_SETUP([parallel extraction links to the latest target member])
+AT_KEYWORDS([extract parallel parallel-order])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+tar --parallel -cf /dev/null /dev/null 2>&1 | grep -q 'not supported' && exit 77
+tar cf empty -T /dev/null
+timeout 60 tar --parallel -xf empty 2>probe.err || exit 1
+test ! -s probe.err || AT_SKIP_TEST
+mkdir old new ref
+echo old > old/f
+echo new > new/f
+ln new/f new/h || AT_SKIP_TEST
+tar cf archive -C old f
+tar rf archive -C new f h
+timeout 60 tar --no-parallel -xf archive -C ref || exit 1
+test "`cat ref/h`" = new || exit 1
+for i in 1 2 3 4 5; do
+  mkdir dst$i
+  timeout 60 tar --parallel -xf archive -C dst$i || exit 1
+  cmp ref/f dst$i/f || exit 1
+  cmp ref/h dst$i/h || exit 1
+  test "`ls -i dst$i/f | sed 's/ .*//'`" = \
+       "`ls -i dst$i/h | sed 's/ .*//'`" || exit 1
+done
+echo ok
+],
+[0],
+[ok
+])
+
+AT_CLEANUP
+
+# A hard-link source and its ancestors can predate the archive.  Later
+# members must not replace either path until the earlier link is made.
+
+AT_SETUP([parallel extraction orders links to pre-existing targets])
+AT_KEYWORDS([extract parallel parallel-order])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+tar --parallel -cf /dev/null /dev/null 2>&1 | grep -q 'not supported' && exit 77
+tar cf empty -T /dev/null
+timeout 60 tar --parallel -xf empty 2>probe.err || exit 1
+test ! -s probe.err || AT_SKIP_TEST
+mkdir src src/d src/e src/old replace
+echo old > src/f
+ln src/f src/d/h || AT_SKIP_TEST
+echo first > src/old/f
+ln -s old src/alias || AT_SKIP_TEST
+ln src/old/f src/e/h || AT_SKIP_TEST
+tar cf archive -C src f d/h alias/f e/h
+# Leave the links pointing to sources that only exist in the destination.
+tar --delete -f archive f alias/f || exit 1
+echo new > replace/f
+ln -s new replace/alias
+tar rf archive -C replace f alias
+for i in 0 1 2 3 4 5; do
+  mkdir dst$i dst$i/old dst$i/new
+  cp src/f dst$i/f
+  cp src/old/f dst$i/old/f
+  echo second > dst$i/new/f
+  ln -s old dst$i/alias
+  option=--parallel
+  test "$i" = 0 && option=--no-parallel
+  timeout 60 tar "$option" -xf archive -C dst$i || exit 1
+  test "`cat dst$i/d/h`" = old || exit 1
+  test "`cat dst$i/e/h`" = first || exit 1
+  test "`cat dst$i/f`" = new || exit 1
+  test "`readlink dst$i/alias`" = new || exit 1
+done
+echo ok
+],
+[0],
+[ok
+])
+
+AT_CLEANUP
+
+# Reusing a directory name after a file replaced it must create the
+# directory again, with the last directory member's metadata.
+
+AT_SETUP([parallel extraction replaces a directory twice])
+AT_KEYWORDS([extract parallel parallel-order])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+tar --parallel -cf /dev/null /dev/null 2>&1 | grep -q 'not supported' && exit 77
+tar cf empty -T /dev/null
+timeout 60 tar --parallel -xf empty 2>probe.err || exit 1
+test ! -s probe.err || AT_SKIP_TEST
+mkdir first first/d middle last last/d ref dst
+chmod 700 first/d
+chmod 755 last/d
+echo file > middle/d
+tar cf archive --no-recursion --mtime=@1000000000 -C first d
+tar rf archive --mtime=@1000000050 -C middle d
+tar rf archive --no-recursion --mtime=@1000000100 -C last d
+timeout 60 tar --no-parallel -xpf archive -C ref || exit 1
+timeout 60 tar --parallel -xpf archive -C dst || exit 1
+test -d ref/d && test -d dst/d || exit 1
+genfile --stat=mode.777,mtime ref/d > ref.stat
+genfile --stat=mode.777,mtime dst/d > dst.stat
+cmp ref.stat dst.stat || exit 1
+cat dst.stat
+
+# When the last member is a file, discard the directory's delayed stat.
+tar cf archive --no-recursion -C first d
+tar rf archive -C middle d
+mkdir ref-file dst-file
+timeout 60 tar --no-parallel -xf archive -C ref-file || exit 1
+timeout 60 tar --parallel -xf archive -C dst-file || exit 1
+cmp ref-file/d dst-file/d || exit 1
+],
+[0],
+[755 1000000100
+])
+
+AT_CLEANUP
+
+# Repeated directory members still update the final mode and timestamp
+# when the directory already exists and contains extracted children.
+
+AT_SETUP([parallel extraction uses the last directory metadata])
+AT_KEYWORDS([extract parallel parallel-order])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+tar --parallel -cf /dev/null /dev/null 2>&1 | grep -q 'not supported' && exit 77
+tar cf empty -T /dev/null
+timeout 60 tar --parallel -xf empty 2>probe.err || exit 1
+test ! -s probe.err || AT_SKIP_TEST
+mkdir first first/d last last/d ref dst
+chmod 700 first/d
+chmod 755 last/d
+echo child > first/d/f
+tar cf archive --no-recursion --mtime=@1000000000 -C first d d/f
+tar rf archive --no-recursion --mtime=@1000000100 -C last d
+timeout 60 tar --no-parallel -xpf archive -C ref || exit 1
+timeout 60 tar --parallel -xpf archive -C dst || exit 1
+cmp ref/d/f dst/d/f || exit 1
+genfile --stat=mode.777,mtime ref/d > ref.stat
+genfile --stat=mode.777,mtime dst/d > dst.stat
+cmp ref.stat dst.stat || exit 1
+cat dst.stat
+],
+[0],
+[755 1000000100
+])
+
+AT_CLEANUP
+
+# Replacing a symlink used as a parent changes where subsequent members
+# belong.  The '.' members also exercise cache invalidation across
+# barriers between ordinary and parallel extraction.
+
+AT_SETUP([parallel extraction follows a replaced parent symlink])
+AT_KEYWORDS([extract parallel parallel-order])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+tar --parallel -cf /dev/null /dev/null 2>&1 | grep -q 'not supported' && exit 77
+tar cf empty -T /dev/null
+timeout 60 tar --parallel -xf empty 2>probe.err || exit 1
+test ! -s probe.err || AT_SKIP_TEST
+mkdir first first/e first/f last last/f
+ln -s e first/d || AT_SKIP_TEST
+ln -s first first/e/a
+ln -s f last/d
+ln -s second last/f/b
+for barrier in no yes; do
+  tar cf archive --no-recursion -C first e f d d/a
+  if test "$barrier" = yes; then
+    tar rf archive --no-recursion -C first .
+  fi
+  tar rf archive --no-recursion -C last d
+  if test "$barrier" = yes; then
+    tar rf archive --no-recursion -C last .
+  fi
+  tar rf archive --no-recursion -C last d/b
+  mkdir ref-$barrier dst-$barrier
+  timeout 60 tar --no-parallel -xf archive -C ref-$barrier || exit 1
+  timeout 60 tar --parallel -xf archive -C dst-$barrier || exit 1
+  test "`readlink ref-$barrier/d`" = f || exit 1
+  test "`readlink ref-$barrier/e/a`" = first || exit 1
+  test "`readlink ref-$barrier/f/b`" = second || exit 1
+  for name in d e/a f/b; do
+    test "`readlink ref-$barrier/$name`" = \
+         "`readlink dst-$barrier/$name`" || exit 1
+  done
+  test ! -h dst-$barrier/e/b || exit 1
+done
+echo ok
+],
+[0],
+[ok
+])
+
+AT_CLEANUP
+
+# --overwrite can write the same inode through different names, even
+# when the archive has no hard-link members.  Keep the whole extraction
+# sequential so an earlier writer cannot undo a later truncation.
+
+AT_SETUP([parallel extraction falls back when overwriting hard-link aliases])
+AT_KEYWORDS([extract parallel parallel-order])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+tar --parallel -cf /dev/null /dev/null 2>&1 | grep -q 'not supported' && exit 77
+mkdir src ref dst
+genfile --length 4194304 --file src/f
+genfile --length 0 --file src/h
+tar cf archive -C src f h
+for dir in ref dst; do
+  echo old > $dir/f
+  ln $dir/f $dir/h || AT_SKIP_TEST
+done
+timeout 60 tar --no-parallel --overwrite -xf archive -C ref || exit 1
+timeout 60 tar --parallel --overwrite -xf archive -C dst || exit 1
+for name in f h; do
+  test ! -s ref/$name && test ! -s dst/$name || exit 1
+  cmp ref/$name dst/$name || exit 1
+done
+test "`ls -i dst/f | sed 's/ .*//'`" = \
+     "`ls -i dst/h | sed 's/ .*//'`" || exit 1
+echo ok
+],
+[0],
+[ok
+],
+[tar: parallel extraction is not compatible with the given options; extracting sequentially
+])
+
+AT_CLEANUP

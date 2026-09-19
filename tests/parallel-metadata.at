@@ -1,0 +1,134 @@
+# Process this file with autom4te to create testsuite. -*- Autotest -*-
+
+# Test suite for GNU tar.
+# Copyright 2026 Free Software Foundation, Inc.
+
+# This file is part of GNU tar.
+
+# GNU tar is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+# GNU tar is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# The same member name under distinct -C destinations must not share
+# delayed directory metadata.  Exercise the sequential delayed-stat
+# path as well as the parallel path, with stripped member names.
+
+AT_SETUP([parallel extraction keeps directory metadata per destination])
+AT_KEYWORDS([extract parallel parallel-metadata])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/s1 src/s1/d src/s2 src/s2/d
+chmod 555 src/s1/d
+chmod 511 src/s2/d
+tar cf archive --no-recursion --mtime=@1000000001 -C src s1/d
+tar rf archive --no-recursion --mtime=@1000000002 -C src s2/d
+for engine in sequential delayed parallel; do
+  mkdir "$engine" "$engine/one" "$engine/two"
+  case $engine in
+    sequential) options=--no-parallel;;
+    delayed) options='--no-parallel --delay-directory-restore';;
+    parallel) options=--parallel;;
+  esac
+  timeout 60 tar $options -xpf archive --strip-components=1 \
+    -C "$engine/one" s1/d -C ../two s2/d || exit 1
+  genfile --stat=mode.777,mtime "$engine/one/d"
+  genfile --stat=mode.777,mtime "$engine/two/d"
+done
+],
+[0],
+[555 1000000001
+511 1000000002
+555 1000000001
+511 1000000002
+555 1000000001
+511 1000000002
+])
+
+AT_CLEANUP
+
+# Different -C options can name the same destination.  Keep the last
+# directory metadata in archive order, not the order of the delayed
+# list or of the final depth sort.  The third occurrence revisits the
+# first key, so its existing list entry does not move to the front.
+
+AT_SETUP([parallel extraction keeps latest metadata through aliases])
+AT_KEYWORDS([extract parallel parallel-metadata])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/s1 src/s1/d src/s2 src/s2/d
+chmod 555 src/s1/d
+chmod 511 src/s2/d
+tar cf twice.tar --no-recursion --mtime=@1000000001 -C src s1/d
+tar rf twice.tar --no-recursion --mtime=@1000000002 -C src s2/d
+cp twice.tar thrice.tar
+chmod 711 src/s1/d
+tar rf thrice.tar --no-recursion --mtime=@1000000003 -C src s1/d
+for archive in twice thrice; do
+  for engine in sequential parallel; do
+    dst=`pwd`/$archive-$engine
+    mkdir "$dst"
+    option=--no-parallel
+    test "$engine" = parallel && option=--parallel
+    timeout 60 tar "$option" -xpf "$archive.tar" --strip-components=1 \
+      -C "$dst" s1/d -C "$dst" s2/d || exit 1
+    genfile --stat=mode.777,mtime "$dst/d"
+  done
+done
+],
+[0],
+[511 1000000002
+511 1000000002
+711 1000000003
+711 1000000003
+])
+
+AT_CLEANUP
+
+# An intermediate directory in one destination must not make a
+# pre-existing directory in another destination eligible for metadata
+# replacement under --skip-old-files.
+
+AT_SETUP([parallel extraction scopes intermediate directory metadata])
+AT_KEYWORDS([extract parallel parallel-metadata])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/s1 src/s1/d src/s2 src/s2/d seed seed/d
+echo payload > src/s1/d/f
+chmod 777 src/s2/d
+chmod 555 seed/d
+tar cf archive -C src s1/d/f
+tar rf archive --no-recursion --mtime=@1000000002 -C src s2/d
+tar cf seed.tar --no-recursion --mtime=@1000000003 -C seed d
+for engine in sequential delayed parallel; do
+  mkdir "$engine" "$engine/one" "$engine/two"
+  tar --no-parallel -xpf seed.tar -C "$engine/two" || exit 1
+  case $engine in
+    sequential) options=--no-parallel;;
+    delayed) options='--no-parallel --delay-directory-restore';;
+    parallel) options=--parallel;;
+  esac
+  timeout 60 tar $options -xpf archive --strip-components=1 \
+    --skip-old-files -C "$engine/one" s1/d/f -C ../two s2/d || exit 1
+  cmp src/s1/d/f "$engine/one/d/f" || exit 1
+  genfile --stat=mode.777,mtime "$engine/two/d"
+done
+],
+[0],
+[555 1000000003
+555 1000000003
+555 1000000003
+])
+
+AT_CLEANUP

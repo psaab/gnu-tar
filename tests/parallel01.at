@@ -1,0 +1,511 @@
+# Process this file with autom4te to create testsuite. -*- Autotest -*-
+
+# Test suite for GNU tar.
+# Copyright 2026 Free Software Foundation, Inc.
+
+# This file is part of GNU tar.
+
+# GNU tar is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+# GNU tar is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# The parallel extraction engine must produce exactly what sequential
+# extraction produces: directory ordering with children before their
+# directory members, restrictive directory modes, symlinks, hard links,
+# empty and multi-block files, and the overwrite policies.
+
+# Creating an archive only checks whether the option was compiled in.
+# Extract an empty archive too: io_uring can be unavailable at run time,
+# for example when a container prevents creating its rings.
+m4_define([AT_PARALLEL_RUNTIME_PREREQ],[
+AT_TIMEOUT_PREREQ
+tar --parallel -cf /dev/null /dev/null 2>&1 | grep -q 'not supported' && exit 77
+tar cf parallel-probe.tar -T /dev/null
+timeout 60 tar --parallel -xf parallel-probe.tar 2>parallel-probe.err || exit 1
+test ! -s parallel-probe.err || AT_SKIP_TEST
+rm -f parallel-probe.tar parallel-probe.err
+])
+
+AT_SETUP([parallel extraction matches sequential extraction])
+AT_KEYWORDS([extract parallel parallel01])
+
+AT_TAR_CHECK([
+AT_SORT_PREREQ
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src
+mkdir src/ro src/ro/inner src/deep src/deep/a src/deep/a/b src/empty
+genfile --length 0 --file src/ro/inner/file
+genfile --length 5000 --file src/ro/top
+genfile --length 1048579 --file src/deep/a/b/big
+genfile --length 1 --file src/deep/a/b/one
+genfile --length 511 --file src/deep/a/b/short
+genfile --length 512 --file src/deep/a/b/block
+echo x > src/exec
+chmod 755 src/exec
+echo linked > src/hard1
+ln src/hard1 src/hard2 || AT_SKIP_TEST
+ln -s hard1 src/link
+ln -s /nonexistent src/dangling
+chmod 555 src/ro/inner
+chmod 555 src/ro
+# Children first, directories last, so that directory modes and times
+# have to be deferred.
+tar cf archive -C src deep/a/b/big deep/a/b/one deep/a/b/short deep/a/b/block ro/inner/file ro/top exec hard1 hard2 link dangling deep empty ro
+chmod -R u+rwx src
+
+mkdir seq par
+tar -xf archive --no-parallel -C seq --warning=no-timestamp || exit 1
+tar -xf archive --parallel -C par --warning=no-timestamp || exit 1
+
+# Same names, types, modes and sizes.
+(cd seq && find . | sort | while read f; do genfile --stat=mode.777,size "$f" 2>/dev/null | sed "s|^|$f |"; done) > seq.lst
+(cd par && find . | sort | while read f; do genfile --stat=mode.777,size "$f" 2>/dev/null | sed "s|^|$f |"; done) > par.lst
+cmp seq.lst par.lst || { diff seq.lst par.lst; exit 1; }
+genfile --stat=mode.777 par/ro
+genfile --stat=mode.777 par/ro/inner
+genfile --stat=mode.777 par/exec
+# Same contents, links and inode sharing.
+chmod -R u+rwx seq par
+cmp seq/deep/a/b/big par/deep/a/b/big || exit 1
+test "`readlink par/link`" = hard1 || exit 1
+test "`readlink par/dangling`" = /nonexistent || exit 1
+test "`ls -i par/hard1 | sed 's/ .*//'`" = "`ls -i par/hard2 | sed 's/ .*//'`" || exit 1
+
+# Overwrite policies.
+tar -xf archive --parallel -C par --warning=no-timestamp || exit 1
+chmod -R u+rwx par
+tar -xf archive --parallel --keep-old-files -C par 2>err && exit 1
+grep -c 'Cannot open: File exists' err > /dev/null || { cat err; exit 1; }
+tar -xf archive --parallel --skip-old-files -C par --warning=no-timestamp || exit 1
+echo done
+],
+[0],
+[555
+555
+755
+done
+])
+
+AT_CLEANUP
+
+AT_SETUP([parallel extraction refuses to escape the destination])
+AT_KEYWORDS([extract parallel parallel02])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir victim src src/sym
+echo v > victim/expected
+cp victim/expected victim.expected
+echo evil > src/sym/file1
+tar cf a.tar -C src sym/file1
+mkdir ext
+ln -s ../victim ext/sym
+tar -xf a.tar --parallel -C ext 2>err
+echo status=$?
+sed 's/: Capabilities insufficient$/: Invalid cross-device link/' err >&2
+cmp victim/expected victim.expected
+],
+[0],
+[status=2
+],
+[tar: sym/file1: Cannot open: Invalid cross-device link
+tar: Exiting with failure status due to previous errors
+])
+
+AT_CLEANUP
+
+# A member that is skipped or fails after its data has started to
+# arrive: the engine must keep the job alive until the whole member has
+# been read (it used to free it and crash).
+
+AT_SETUP([parallel extraction skips a large existing file])
+AT_KEYWORDS([extract parallel parallel03])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src dst
+genfile --length 8388608 --file src/big
+genfile --length 8388608 --file src/big2
+echo old > dst/big
+echo old > dst/big2
+tar cf archive -C src big big2
+tar -xf archive --parallel --skip-old-files -C dst || exit 1
+tar -xf archive --parallel --keep-old-files -C dst 2>err && exit 1
+sort err
+cat dst/big dst/big2
+],
+[0],
+[tar: Exiting with failure status due to previous errors
+tar: big2: Cannot open: File exists
+tar: big: Cannot open: File exists
+old
+old
+])
+
+AT_CLEANUP
+
+# Two members with the same name: the later one wins, whatever the
+# order in which the engine gets around to them, and the earlier one's
+# data must not leak into the result.
+
+AT_SETUP([parallel extraction orders members with the same name])
+AT_KEYWORDS([extract parallel parallel04])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src1 src2 src3 src4 src4/dup
+genfile --length 4194304 --file src1/dup
+genfile --length 0 --file src2/dup
+echo third > src3/dup
+echo indir > src4/dup/g
+# Three files named DUP, then a directory DUP with a member below it.
+tar cf archive -C src1 dup
+tar rf archive -C src2 dup
+tar rf archive -C src3 dup
+tar rf archive -C src4 dup
+for opt in --overwrite ''; do
+  rm -rf dst ref; mkdir dst ref
+  tar -xf archive $opt -C dst --warning=no-timestamp || exit 1
+  tar -xf archive --no-parallel $opt -C ref --warning=no-timestamp || exit 1
+  cat dst/dup/g
+  diff -r ref dst || exit 1
+done
+# The same, without the directory: the last file wins.
+tar cf archive -C src1 dup
+tar rf archive -C src2 dup
+tar rf archive -C src3 dup
+for opt in --overwrite ''; do
+  rm -rf dst; mkdir dst
+  tar -xf archive $opt -C dst --warning=no-timestamp || exit 1
+  cat dst/dup
+done
+],
+[0],
+[indir
+indir
+third
+third
+])
+
+AT_CLEANUP
+
+AT_SETUP([parallel extraction of hard links to non-regular files])
+AT_KEYWORDS([extract parallel parallel05])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src dst ref
+ln -s nowhere src/sym
+mkfifo src/fifo || AT_SKIP_TEST
+echo reg > src/reg
+ln src/sym src/hsym 2>/dev/null || AT_SKIP_TEST
+ln src/fifo src/hfifo || AT_SKIP_TEST
+mkdir src/d
+ln src/reg src/d/hreg
+tar cf archive -C src sym fifo reg hsym hfifo d/hreg
+tar tvf archive | grep -c 'link to'
+tar -xf archive --parallel -C dst --warning=no-timestamp || exit 1
+tar -xf archive --no-parallel -C ref --warning=no-timestamp || exit 1
+(cd ref && find . | sort | while read f; do genfile --stat=mode.777,size "$f" 2>/dev/null | sed "s|^|$f |"; done) > ref.lst
+(cd dst && find . | sort | while read f; do genfile --stat=mode.777,size "$f" 2>/dev/null | sed "s|^|$f |"; done) > dst.lst
+cmp ref.lst dst.lst || { diff ref.lst dst.lst; exit 1; }
+test -p dst/hfifo && echo fifo
+test "`readlink dst/hsym`" = nowhere && echo sym
+cat dst/d/hreg
+],
+[0],
+[2
+fifo
+sym
+reg
+],
+[],[],[],[ustar,posix,gnu,oldgnu])
+
+AT_CLEANUP
+
+# Several -C options: the same relative directory name under different
+# destinations must be created in each of them.
+
+AT_SETUP([parallel extraction into several directories])
+AT_KEYWORDS([extract parallel parallel06])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/d src/d/e dst1 dst2
+echo f > src/d/f
+echo g > src/d/g
+echo h > src/d/e/h
+tar cf archive -C src d/f d/g d/e/h
+tar -xf archive --parallel --warning=no-timestamp -C dst1 d/f -C ../dst2 d/g d/e/h || exit 1
+find dst1 dst2 -type f | sort
+cat dst1/d/f dst2/d/g dst2/d/e/h
+],
+[0],
+[dst1/d/f
+dst2/d/e/h
+dst2/d/g
+f
+g
+h
+])
+
+AT_CLEANUP
+
+# A FIFO where a regular file is to be extracted: the open must not
+# block, and the policies must match sequential extraction.
+
+AT_SETUP([parallel extraction over an existing FIFO])
+AT_KEYWORDS([extract parallel parallel07])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src dst
+echo data > src/f
+tar cf archive -C src f
+mkfifo dst/f || AT_SKIP_TEST
+tar -xf archive --overwrite -C dst
+echo status=$?
+test -p dst/f && echo fifo kept
+tar -xf archive --parallel -C dst --warning=no-timestamp
+echo status=$?
+cat dst/f
+],
+[0],
+[status=2
+fifo kept
+status=0
+data
+],
+[tar: f: Cannot open: No such device or address
+tar: Exiting with failure status due to previous errors
+])
+
+AT_CLEANUP
+
+# With few file descriptors available, parent directories, symlinks and
+# files in flight must all fit in the budget.
+
+AT_SETUP([parallel extraction with few file descriptors])
+AT_KEYWORDS([extract parallel parallel08])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+(ulimit -n 128) 2>/dev/null || AT_SKIP_TEST
+mkdir src dst ref
+i=0
+while test $i -lt 300; do
+  mkdir src/d$i src/d$i/sub
+  ln -s f src/d$i/l
+  echo $i > src/d$i/f
+  echo $i > src/d$i/sub/g
+  i=`expr $i + 1`
+done
+tar cf archive -C src .
+(ulimit -n 128 && tar -xf archive --parallel -C dst --warning=no-timestamp) || exit 1
+tar -xf archive --no-parallel -C ref --warning=no-timestamp || exit 1
+diff -r ref dst || exit 1
+find dst -type l | wc -l | tr -d ' '
+find dst -type f | wc -l | tr -d ' '
+],
+[0],
+[300
+600
+])
+
+AT_CLEANUP
+
+# A hard link to a file that a later member replaces must link to the
+# original, as it does sequentially: the replacement waits for the
+# link to be made.
+
+AT_SETUP([parallel extraction links before the target is replaced])
+AT_KEYWORDS([extract parallel parallel09])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir s1 s1/d s2
+echo old > s1/f
+ln s1/f s1/d/h || AT_SKIP_TEST
+echo new > s2/f
+tar cf archive -C s1 f d/h
+tar rf archive -C s2 f
+i=0
+while test $i -lt 20; do
+  rm -rf dst; mkdir dst
+  tar -xf archive --parallel -C dst --warning=no-timestamp || exit 1
+  test "`cat dst/d/h`" = old || { echo "run $i: link has `cat dst/d/h`"; exit 1; }
+  test "`cat dst/f`" = new || { echo "run $i: file has `cat dst/f`"; exit 1; }
+  i=`expr $i + 1`
+done
+echo ok
+],
+[0],
+[ok
+])
+
+AT_CLEANUP
+
+# A file replaced by a directory that the archive mentions more than
+# once, followed by its children: repeated directory members must wait
+# their turn like everything else.
+
+AT_SETUP([parallel extraction with repeated directory members])
+AT_KEYWORDS([extract parallel parallel10])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir t1 t2 t2/dup
+echo file > t1/dup
+i=0
+while test $i -lt 300; do
+  echo $i > t2/dup/c$i
+  i=`expr $i + 1`
+done
+tar cf archive -C t1 dup
+tar rf archive -C t2 --no-recursion dup dup
+tar rf archive -C t2 dup
+i=0
+while test $i -lt 5; do
+  rm -rf dst; mkdir dst
+  tar -xf archive --parallel -C dst --warning=no-timestamp || exit 1
+  ls dst/dup | wc -l | tr -d ' '
+  i=`expr $i + 1`
+done
+],
+[0],
+[300
+300
+300
+300
+300
+])
+
+AT_CLEANUP
+
+# Hard links whose target sits in another directory need two parent
+# descriptors each; with a small cache they must not starve each other.
+
+AT_SETUP([parallel extraction of cross-directory hard links])
+AT_KEYWORDS([extract parallel parallel11])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+(ulimit -n 128) 2>/dev/null || AT_SKIP_TEST
+mkdir src
+i=0
+while test $i -lt 300; do
+  mkdir src/a$i src/b$i
+  echo $i > src/a$i/f
+  ln src/a$i/f src/b$i/h || AT_SKIP_TEST
+  i=`expr $i + 1`
+done
+tar cf archive -C src .
+for lim in 128 80; do
+  rm -rf dst; mkdir dst
+  (ulimit -n $lim && tar -xf archive --parallel -C dst --warning=no-timestamp) || exit 1
+  i=0
+  n=0
+  while test $i -lt 300; do
+    a=`ls -i dst/a$i/f | sed 's/ .*//'`
+    b=`ls -i dst/b$i/h | sed 's/ .*//'`
+    test "$a" = "$b" && n=`expr $n + 1`
+    i=`expr $i + 1`
+  done
+  echo "linked $n"
+done
+],
+[0],
+[linked 300
+linked 300
+])
+
+AT_CLEANUP
+
+# --absolute-names: parent directories and links must be created at
+# the absolute location, not relative to the working directory.
+
+AT_SETUP([parallel extraction with --absolute-names])
+AT_KEYWORDS([extract parallel parallel12])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+here=`pwd`
+mkdir abs abs/x abs/x/y
+echo f > abs/x/f
+echo g > abs/x/y/g
+ln -s f abs/x/l
+ln abs/x/f abs/x/h || AT_SKIP_TEST
+tar -cPf archive $here/abs/x/f $here/abs/x/y/g $here/abs/x/l $here/abs/x/h
+rm -rf abs
+tar -xPf archive --parallel --warning=no-timestamp || exit 1
+test -d "$here/tmp" && exit 1
+cat abs/x/f abs/x/y/g
+readlink abs/x/l
+test "`ls -i abs/x/f | sed 's/ .*//'`" = "`ls -i abs/x/h | sed 's/ .*//'`" || exit 1
+find . -type f | sort
+],
+[0],
+[f
+g
+f
+./abs/x/f
+./abs/x/h
+./abs/x/y/g
+./archive
+])
+
+AT_CLEANUP
+
+# Timestamp warnings and diagnostics for names in the way must match
+# sequential extraction.
+
+AT_SETUP([parallel extraction diagnostics match sequential extraction])
+AT_KEYWORDS([extract parallel parallel13])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src seq par
+echo x > src/future
+genfile --date '3 years from now' --file src/future 2>/dev/null \
+  || touch -d '2222-02-02' src/future || AT_SKIP_TEST
+tar cf archive -C src future
+tar -xf archive --no-parallel -C seq 2>seq.err
+tar -xf archive --parallel -C par 2>par.err
+sed 's/ is .* s in the future/ is N s in the future/' seq.err > seq.norm
+sed 's/ is .* s in the future/ is N s in the future/' par.err > par.norm
+cmp seq.norm par.norm || { cat seq.norm par.norm; exit 1; }
+grep -c 'in the future' par.norm
+
+# A file followed by a member below it: one diagnostic, as sequentially.
+mkdir clash
+echo a > clash/a
+tar cf archive -C clash a
+mkdir clash/a.d
+echo b > clash/a.d/b
+tar rf archive -C clash --transform 's|^a\.d/|a/|' a.d/b
+rm -rf seq par; mkdir seq par
+tar -xf archive --no-parallel -C seq 2>seq.err
+echo status=$?
+tar -xf archive --parallel -C par 2>par.err
+echo status=$?
+cmp seq.err par.err || { cat seq.err par.err; exit 1; }
+cat par.err
+],
+[0],
+[1
+status=2
+status=2
+tar: a/b: Cannot open: Not a directory
+tar: Exiting with failure status due to previous errors
+])
+
+AT_CLEANUP

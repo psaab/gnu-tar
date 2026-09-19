@@ -1,0 +1,155 @@
+# Process this file with autom4te to create testsuite. -*- Autotest -*-
+
+# Test suite for GNU tar.
+# Copyright 2026 Free Software Foundation, Inc.
+
+# This file is part of GNU tar.
+
+# GNU tar is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+# GNU tar is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# A skipped member can already hold the entire data-buffer budget when
+# its open completes.  Releasing the job must return that budget even
+# while the parser is still reading the member.  A backlog of empty
+# members and a small descriptor limit delay the open; the final member
+# is larger than the 256 MiB buffer budget.
+
+AT_SETUP([parallel extraction releases buffered data for skipped files])
+AT_KEYWORDS([extract parallel parallel-budget])
+
+AT_TAR_CHECK([
+AT_SKIP_LARGE_FILES
+AT_TIMEOUT_PREREQ
+tar --parallel -cf /dev/null /dev/null 2>&1 | grep -q 'not supported' && exit 77
+mkdir src dst
+tar cf empty.tar -T /dev/null
+tar --parallel -xf empty.tar -C dst 2>probe.err || exit 1
+test ! -s probe.err || AT_SKIP_TEST
+
+awk 'BEGIN { for (i = 0; i < 50000; i++) print "empty" i }' > names
+(cd src && genfile --files-from ../names) || exit 1
+genfile --length 314572800 --file src/big
+echo big >> names
+tar cf archive -C src -T names || exit 1
+echo existing > dst/big
+
+timeout 60 tar -xf archive --parallel --parallel-open-files=4 \
+  --parallel-max-meta-threads=1 --skip-old-files -C dst || exit 1
+test -f dst/empty0 && test -f dst/empty49999 || exit 1
+cat dst/big
+],
+[0],
+[existing
+],
+[], [], [], [gnu])
+
+AT_CLEANUP
+
+# Different -C option indices can refer to the same directory.  Keeping
+# one descriptor for every index leaks past the engine's descriptor
+# budget, even when each member only creates a top-level symlink.
+
+AT_SETUP([parallel extraction bounds working-directory descriptors])
+AT_KEYWORDS([extract parallel parallel-budget parallel-working-directory])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+AT_PARALLEL_RUNTIME_PREREQ
+(ulimit -n 128) 2>/dev/null || AT_SKIP_TEST
+mkdir src ref dst
+awk 'BEGIN { for (i = 0; i < 200; i++) print "link" i }' > names
+while read name; do
+  ln -s nowhere src/$name || AT_SKIP_TEST
+done < names
+tar cf archive -C src -T names || exit 1
+
+for destination in ref dst; do
+  option=--parallel
+  test "$destination" = ref && option=--no-parallel
+  absolute_destination=`cd "$destination" && pwd` || exit 1
+  set --
+  while read name; do
+    set -- "$[]@" -C "$absolute_destination" "$name"
+  done < names
+  (ulimit -n 128 && timeout 60 tar "$option" -xf archive "$[]@") \
+    || exit 1
+  while read name; do
+    test "`readlink "$destination/$name"`" = nowhere || exit 1
+  done < names
+done
+echo ok
+],
+[0],
+[ok
+],
+[], [], [], [gnu])
+
+AT_CLEANUP
+
+# Descriptors already open when tar starts are not available to the
+# engine; the budget must leave them out, and a shortage met anyway
+# must be retried rather than reported.
+
+AT_SETUP([parallel extraction with inherited descriptors])
+AT_KEYWORDS([extract parallel parallel-budget])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+(ulimit -n 128) 2>/dev/null || AT_SKIP_TEST
+mkdir src dst
+i=0
+while test $i -lt 300; do
+  echo $i > src/f$i
+  i=`expr $i + 1`
+done
+tar cf archive -C src .
+fd=20
+while test $fd -lt 84; do
+  eval "exec $fd</dev/null" || AT_SKIP_TEST
+  fd=`expr $fd + 1`
+done
+(ulimit -n 128 && timeout 60 tar --parallel -xf archive -C dst) || exit 1
+ls dst | wc -l | tr -d ' '
+],
+[0],
+[300
+])
+
+AT_CLEANUP
+
+# A tight address-space limit leaves little room for threads and
+# buffers; extraction must still succeed, with the engine or without.
+
+AT_SETUP([parallel extraction under an address-space limit])
+AT_KEYWORDS([extract parallel parallel-budget])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+(ulimit -v 65536) 2>/dev/null || AT_SKIP_TEST
+mkdir src dst
+genfile --length 3145728 --file src/big
+i=0
+while test $i -lt 50; do
+  echo $i > src/f$i
+  i=`expr $i + 1`
+done
+tar cf archive -C src .
+(ulimit -v 65536 && timeout 60 tar -xf archive -C dst) || exit 1
+cmp src/big dst/big || exit 1
+ls dst | wc -l | tr -d ' '
+],
+[0],
+[51
+])
+
+AT_CLEANUP

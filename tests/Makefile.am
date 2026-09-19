@@ -114,6 +114,12 @@ TESTSUITE_AT = \
  exclude22.at\
  exclude23.at\
  extrac01.at\
+ parallel01.at\
+ parallel-order.at\
+ parallel-budget.at\
+ parallel-alias.at\
+ parallel-failure.at\
+ parallel-metadata.at\
  extrac02.at\
  extrac03.at\
  extrac04.at\

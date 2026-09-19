@@ -52,6 +52,7 @@ src/incremen.c
 src/list.c
 src/misc.c
 src/names.c
+src/parallel.c
 src/tar.c
 src/update.c
 src/xheader.c
