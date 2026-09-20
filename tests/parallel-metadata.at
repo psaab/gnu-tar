@@ -1,0 +1,314 @@
+# Process this file with autom4te to create testsuite. -*- Autotest -*-
+
+# Test suite for GNU tar.
+# Copyright 2026 Free Software Foundation, Inc.
+
+# This file is part of GNU tar.
+
+# GNU tar is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+# GNU tar is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# The same member name under distinct -C destinations must not share
+# delayed directory metadata.  Exercise the sequential delayed-stat
+# path as well as the parallel path, with stripped member names.
+
+AT_SETUP([parallel extraction keeps directory metadata per destination])
+AT_KEYWORDS([extract parallel parallel-metadata])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/s1 src/s1/d src/s2 src/s2/d
+chmod 555 src/s1/d
+chmod 511 src/s2/d
+tar cf archive --no-recursion --mtime=@1000000001 -C src s1/d
+tar rf archive --no-recursion --mtime=@1000000002 -C src s2/d
+for engine in sequential delayed parallel; do
+  mkdir "$engine" "$engine/one" "$engine/two"
+  case $engine in
+    sequential) options=--no-parallel;;
+    delayed) options='--no-parallel --delay-directory-restore';;
+    parallel) options=--parallel;;
+  esac
+  timeout 60 tar $options -xpf archive --strip-components=1 \
+    -C "$engine/one" s1/d -C ../two s2/d || exit 1
+  genfile --stat=mode.777,mtime "$engine/one/d"
+  genfile --stat=mode.777,mtime "$engine/two/d"
+done
+],
+[0],
+[555 1000000001
+511 1000000002
+555 1000000001
+511 1000000002
+555 1000000001
+511 1000000002
+])
+
+AT_CLEANUP
+
+# Absolute and relative names can update the same directory.  The
+# sequential fallback must use the last member's attributes.
+
+AT_SETUP([parallel extraction keeps latest metadata for absolute aliases])
+AT_KEYWORDS([extract parallel parallel-metadata])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+AT_PARALLEL_PREREQ
+mkdir src src/d
+tar cf archive --no-recursion --mode=555 --mtime=@1000000001 -C src d
+tar rf archive --no-recursion --mode=711 --mtime=@1000000002 -C src ./d
+for absolute in first last; do
+  case $absolute in
+    first) pattern='^d';;
+    last) pattern='^\./d';;
+  esac
+  for engine in sequential parallel; do
+    dir=`pwd`/$absolute-$engine
+    mkdir "$dir"
+    replacement=`printf '%s\n' "$dir" | sed 's/[[\\\\&|]]/\\\\&/g'`
+    option=--no-parallel
+    test "$engine" = parallel && option=--parallel
+    timeout 60 tar "$option" -xPpf archive -C "$dir" \
+      --transform="flags=r;s|$pattern|$replacement/d|" || exit 1
+    genfile --stat=mode.777,mtime "$dir/d" > "$engine.stat"
+  done
+  cmp sequential.stat parallel.stat || exit 1
+  test "`cat parallel.stat`" = '711 1000000002' || exit 1
+done
+echo ok
+],
+[0],
+[ok
+],
+[AT_PARALLEL_INCOMPATIBLE_WARNING
+AT_PARALLEL_INCOMPATIBLE_WARNING
+])
+
+AT_CLEANUP
+
+# Absolute and relative names cannot be ordered by lexical depth.  If
+# the parent's absolute name sorts before its relative child, restoring
+# the parent's restrictive mode prevents restoring the child's metadata.
+# Falling back for the entire extraction preserves sequential ordering.
+
+AT_SETUP([parallel extraction falls back for absolute directory names])
+AT_KEYWORDS([extract parallel parallel-metadata parallel-absolute])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+AT_PARALLEL_PREREQ
+AT_UNPRIVILEGED_PREREQ
+mkdir src src/d src/d/e
+tar cf archive --no-recursion --mode=555 --mtime=@1000000001 -C src d/e
+tar rf archive --no-recursion --mode=000 --mtime=@1000000002 -C src d
+echo 'AT_PARALLEL_INCOMPATIBLE_WARNING' > expected.err
+for absolute in parent child; do
+  case $absolute in
+    parent) pattern='^d/*$'; target=d;;
+    child) pattern='^d/e'; target=d/e;;
+  esac
+  for engine in sequential default parallel; do
+    dir=`pwd`/$absolute-$engine
+    mkdir "$dir"
+    replacement=`printf '%s\n' "$dir" | sed 's/[[\\\\&|]]/\\\\&/g'`
+    case $engine in
+      sequential) option=--no-parallel;;
+      default) option=;;
+      parallel) option=--parallel;;
+    esac
+    timeout 60 tar $option -xPpf archive -C "$dir" \
+      --transform="flags=r;s|$pattern|$replacement/$target|" \
+      2>extract.err || { cat extract.err >&2; exit 1; }
+    if test "$engine" = parallel; then
+      cmp expected.err extract.err || exit 1
+    else
+      test ! -s extract.err || { cat extract.err >&2; exit 1; }
+    fi
+    genfile --stat=mode.777,mtime "$dir/d"
+    chmod u+rwx "$dir/d"
+    genfile --stat=mode.777,mtime "$dir/d/e"
+  done
+done
+],
+[0],
+[0 1000000002
+555 1000000001
+0 1000000002
+555 1000000001
+0 1000000002
+555 1000000001
+0 1000000002
+555 1000000001
+0 1000000002
+555 1000000001
+0 1000000002
+555 1000000001
+])
+
+AT_CLEANUP
+
+# The common single-destination path must also recognize lexical aliases.
+# Updating the first spelling again must use its new order, not its old
+# position in the delayed-stat list.
+
+AT_SETUP([parallel extraction keeps latest metadata for lexical aliases])
+AT_KEYWORDS([extract parallel parallel-metadata])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/d src/d/e
+for spelling in prefix component slash; do
+  case $spelling in
+    prefix) first=d; second=./d;;
+    component) first=d/e; second=d/./e;;
+    slash) first=d/e; second=d//e;;
+  esac
+  tar cf twice.tar --no-recursion --mode=555 --mtime=@1000000001 \
+    -C src "$first"
+  tar rf twice.tar --no-recursion --mode=711 --mtime=@1000000002 \
+    -C src "$second"
+  cp twice.tar thrice.tar
+  tar rf thrice.tar --no-recursion --mode=755 --mtime=@1000000003 \
+    -C src "$first"
+  for archive in twice thrice; do
+    for engine in sequential parallel; do
+      dst=$spelling-$archive-$engine
+      mkdir "$dst"
+      option=--no-parallel
+      test "$engine" = parallel && option=--parallel
+      timeout 60 tar "$option" -xpf "$archive.tar" -C "$dst" || exit 1
+      genfile --stat=mode.777,mtime "$dst/$first" > "$engine.stat"
+    done
+    cmp sequential.stat parallel.stat || exit 1
+    case $archive in
+      twice) test "`cat parallel.stat`" = '711 1000000002' || exit 1;;
+      thrice) test "`cat parallel.stat`" = '755 1000000003' || exit 1;;
+    esac
+  done
+done
+echo ok
+],
+[0],
+[ok
+])
+
+AT_CLEANUP
+
+# Dot components in the parent's spelling must not make it appear deeper
+# than its child.  Restoring this parent's mode first would block the
+# child's metadata update for an unprivileged extractor.
+
+AT_SETUP([parallel extraction orders directory metadata by normalized depth])
+AT_KEYWORDS([extract parallel parallel-metadata])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/d src/d/e
+tar cf archive --no-recursion --mode=555 --mtime=@1000000001 -C src d/e
+tar rf archive --no-recursion --mode=000 --mtime=@1000000002 -C src ././d
+for engine in sequential parallel; do
+  mkdir "$engine"
+  option=--no-parallel
+  test "$engine" = parallel && option=--parallel
+  timeout 60 tar "$option" -xpf archive -C "$engine" || exit 1
+  genfile --stat=mode.777,mtime "$engine/d" > "$engine.stat"
+  chmod u+rwx "$engine/d"
+  genfile --stat=mode.777,mtime "$engine/d/e" >> "$engine.stat"
+done
+cmp sequential.stat parallel.stat || exit 1
+cat parallel.stat
+],
+[0],
+[0 1000000002
+555 1000000001
+])
+
+AT_CLEANUP
+
+# Different -C options can name the same destination.  Keep the last
+# directory metadata in archive order, not the order of the delayed
+# list or of the final depth sort.  The third occurrence revisits the
+# first key, so its existing list entry does not move to the front.
+
+AT_SETUP([parallel extraction keeps latest metadata through aliases])
+AT_KEYWORDS([extract parallel parallel-metadata])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/s1 src/s1/d src/s2 src/s2/d
+chmod 555 src/s1/d
+chmod 511 src/s2/d
+tar cf twice.tar --no-recursion --mtime=@1000000001 -C src s1/d
+tar rf twice.tar --no-recursion --mtime=@1000000002 -C src s2/d
+cp twice.tar thrice.tar
+chmod 711 src/s1/d
+tar rf thrice.tar --no-recursion --mtime=@1000000003 -C src s1/d
+for archive in twice thrice; do
+  for engine in sequential parallel; do
+    dst=`pwd`/$archive-$engine
+    mkdir "$dst"
+    option=--no-parallel
+    test "$engine" = parallel && option=--parallel
+    timeout 60 tar "$option" -xpf "$archive.tar" --strip-components=1 \
+      -C "$dst" s1/d -C "$dst" s2/d || exit 1
+    genfile --stat=mode.777,mtime "$dst/d"
+  done
+done
+],
+[0],
+[511 1000000002
+511 1000000002
+711 1000000003
+711 1000000003
+])
+
+AT_CLEANUP
+
+# An intermediate directory in one destination must not make a
+# pre-existing directory in another destination eligible for metadata
+# replacement under --skip-old-files.
+
+AT_SETUP([parallel extraction scopes intermediate directory metadata])
+AT_KEYWORDS([extract parallel parallel-metadata])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/s1 src/s1/d src/s2 src/s2/d seed seed/d
+echo payload > src/s1/d/f
+chmod 777 src/s2/d
+chmod 555 seed/d
+tar cf archive -C src s1/d/f
+tar rf archive --no-recursion --mtime=@1000000002 -C src s2/d
+tar cf seed.tar --no-recursion --mtime=@1000000003 -C seed d
+for engine in sequential delayed parallel; do
+  mkdir "$engine" "$engine/one" "$engine/two"
+  tar --no-parallel -xpf seed.tar -C "$engine/two" || exit 1
+  case $engine in
+    sequential) options=--no-parallel;;
+    delayed) options='--no-parallel --delay-directory-restore';;
+    parallel) options=--parallel;;
+  esac
+  timeout 60 tar $options -xpf archive --strip-components=1 \
+    --skip-old-files -C "$engine/one" s1/d/f -C ../two s2/d || exit 1
+  cmp src/s1/d/f "$engine/one/d/f" || exit 1
+  genfile --stat=mode.777,mtime "$engine/two/d"
+done
+],
+[0],
+[555 1000000003
+555 1000000003
+555 1000000003
+])
+
+AT_CLEANUP

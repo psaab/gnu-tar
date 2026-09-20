@@ -1,0 +1,331 @@
+# Process this file with autom4te to create testsuite. -*- Autotest -*-
+
+# Test suite for GNU tar.
+# Copyright 2026 Free Software Foundation, Inc.
+
+# This file is part of GNU tar.
+
+# GNU tar is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+# GNU tar is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+AT_SETUP([parallel extraction orders hard links through directory aliases])
+AT_KEYWORDS([extract parallel parallel-alias])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src old
+: > names
+: > sources
+i=0
+while test $i -lt 100; do
+  mkdir old/r$i src/r$i
+  echo old > old/r$i/f
+  echo new > src/r$i/f
+  ln -s ../old/r$i src/a$i || AT_SKIP_TEST
+  ln old/r$i/f src/h$i || AT_SKIP_TEST
+  echo a$i/f >> names
+  echo h$i >> names
+  echo r$i/f >> names
+  echo a$i/f >> sources
+  i=`expr $i + 1`
+done
+tar cf archive -C src -T names || exit 1
+tar --delete -f archive -T sources || exit 1
+for run in ref dst1 dst2 dst3; do
+  mkdir $run
+  i=0
+  while test $i -lt 100; do
+    mkdir $run/r$i
+    echo old > $run/r$i/f
+    ln -s r$i $run/a$i
+    i=`expr $i + 1`
+  done
+  option=--parallel
+  test $run = ref && option=--no-parallel
+  timeout 60 tar "$option" -xf archive -C $run || exit 1
+  i=0
+  while test $i -lt 100; do
+    test "`cat $run/h$i`" = old || exit 1
+    test "`cat $run/r$i/f`" = new || exit 1
+    i=`expr $i + 1`
+  done
+done
+echo ok
+],
+[0],
+[ok
+])
+
+AT_CLEANUP
+
+# Absolute and relative spellings can name the same destination without
+# crossing a symbolic link or a mount.  Transform on extraction so the
+# archive itself has short names, even with formats such as v7.
+
+AT_SETUP([parallel extraction orders absolute member names])
+AT_KEYWORDS([extract parallel parallel-alias])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+AT_PARALLEL_PREREQ
+mkdir src replace
+: > names
+: > sources
+i=0
+while test $i -lt 100; do
+  echo old > src/f$i
+  ln src/f$i src/h$i || AT_SKIP_TEST
+  ln src/f$i src/g$i || AT_SKIP_TEST
+  echo new > replace/f$i
+  echo f$i >> names
+  echo h$i >> names
+  echo g$i >> names
+  echo f$i >> sources
+  i=`expr $i + 1`
+done
+tar cf archive -C src -T names || exit 1
+tar rf archive -C replace -T sources || exit 1
+for run in ref dst1 dst2 dst3; do
+  mkdir $run
+  dir=`pwd`/$run
+  replacement=`printf '%s\n' "$dir" | sed 's/[[\\\\&|]]/\\\\&/g'`
+  option=--parallel
+  test $run = ref && option=--no-parallel
+  timeout 60 tar "$option" -xPf archive -C "$dir" \
+    --transform="flags=r;s|^f|$replacement/f|" || exit 1
+  i=0
+  while test $i -lt 100; do
+    test "`cat $run/f$i`" = new || exit 1
+    test "`cat $run/h$i`" = old || exit 1
+    cmp $run/h$i $run/g$i || exit 1
+    f=`ls -i $run/f$i | sed 's/ .*//'`
+    h=`ls -i $run/h$i | sed 's/ .*//'`
+    g=`ls -i $run/g$i | sed 's/ .*//'`
+    test "$f" != "$h" && test "$h" = "$g" || exit 1
+    i=`expr $i + 1`
+  done
+done
+echo ok
+],
+[0],
+[ok
+],
+[AT_PARALLEL_INCOMPATIBLE_WARNING
+AT_PARALLEL_INCOMPATIBLE_WARNING
+AT_PARALLEL_INCOMPATIBLE_WARNING
+])
+
+AT_CLEANUP
+
+AT_SETUP([parallel extraction orders absolute hard-link targets])
+AT_KEYWORDS([extract parallel parallel-alias])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+AT_PARALLEL_PREREQ
+mkdir src replace
+: > names
+: > sources
+i=0
+while test $i -lt 100; do
+  echo old > src/f$i
+  ln src/f$i src/h$i || AT_SKIP_TEST
+  ln src/f$i src/g$i || AT_SKIP_TEST
+  echo new > replace/f$i
+  echo f$i >> names
+  echo h$i >> names
+  echo g$i >> names
+  echo f$i >> sources
+  i=`expr $i + 1`
+done
+tar cf archive -C src -T names || exit 1
+tar rf archive -C replace -T sources || exit 1
+for run in ref dst1 dst2 dst3; do
+  mkdir $run
+  dir=`pwd`/$run
+  replacement=`printf '%s\n' "$dir" | sed 's/[[\\\\&|]]/\\\\&/g'`
+  option=--parallel
+  test $run = ref && option=--no-parallel
+  timeout 60 tar "$option" -xPf archive -C "$dir" \
+    --transform="flags=h;s|^f|$replacement/f|" || exit 1
+  i=0
+  while test $i -lt 100; do
+    test "`cat $run/f$i`" = new || exit 1
+    test "`cat $run/h$i`" = old || exit 1
+    cmp $run/h$i $run/g$i || exit 1
+    f=`ls -i $run/f$i | sed 's/ .*//'`
+    h=`ls -i $run/h$i | sed 's/ .*//'`
+    g=`ls -i $run/g$i | sed 's/ .*//'`
+    test "$f" != "$h" && test "$h" = "$g" || exit 1
+    i=`expr $i + 1`
+  done
+done
+echo ok
+],
+[0],
+[ok
+],
+[AT_PARALLEL_INCOMPATIBLE_WARNING
+AT_PARALLEL_INCOMPATIBLE_WARNING
+AT_PARALLEL_INCOMPATIBLE_WARNING
+])
+
+AT_CLEANUP
+
+AT_SETUP([parallel extraction creates a later -C destination])
+AT_KEYWORDS([extract parallel parallel-alias])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/d src/a dst
+echo payload > src/a/f
+tar cf archive --no-recursion -C src d a/f || exit 1
+timeout 60 tar --parallel -xf archive -C dst d -C d a/f || exit 1
+cmp src/a/f dst/d/a/f || exit 1
+echo ok
+],
+[0],
+[ok
+])
+
+AT_CLEANUP
+
+AT_SETUP([parallel extraction orders repeated destinations])
+AT_KEYWORDS([extract parallel parallel-alias])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src replace
+: > names
+: > sources
+i=0
+while test $i -lt 100; do
+  mkdir src/d$i
+  echo old > src/f$i
+  ln src/f$i src/d$i/h || AT_SKIP_TEST
+  echo new > replace/f$i
+  echo f$i >> names
+  echo d$i/h >> names
+  echo f$i >> sources
+  i=`expr $i + 1`
+done
+tar cf archive -C src -T names || exit 1
+tar --delete -f archive -T sources || exit 1
+tar rf archive -C replace -T sources || exit 1
+for run in ref dst; do
+  mkdir $run
+  dir=`pwd`/$run
+  set -- -C "$dir"
+  i=0
+  while test $i -lt 100; do
+    echo old > $run/f$i
+    set -- "$@" d$i/h
+    i=`expr $i + 1`
+  done
+  set -- "$@" -C "$dir" -T sources
+  option=--parallel
+  test $run = ref && option=--no-parallel
+  timeout 60 tar "$option" -xf archive "$@" || exit 1
+  i=0
+  while test $i -lt 100; do
+    test "`cat $run/d$i/h`" = old || exit 1
+    test "`cat $run/f$i`" = new || exit 1
+    i=`expr $i + 1`
+  done
+done
+echo ok
+],
+[0],
+[ok
+])
+
+AT_CLEANUP
+
+# A parent that is a symbolic link makes different names refer to the
+# same file.  Members below such a parent run alone, in archive order,
+# whether the link pre-exists in the destination or is itself a member.
+
+AT_SETUP([parallel extraction orders members below symlinked parents])
+AT_KEYWORDS([extract parallel parallel-alias])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir s1 s1/d s2 s2/l s3 s3/d s4 s4/a s4/a/l s5 s5/d
+echo old > s1/d/f
+echo new > s2/l/f
+tar cf pre.tar -C s1 d/f
+tar rf pre.tar -C s2 l/f
+ln -s d s3/l || AT_SKIP_TEST
+echo viaL > s3/d/g
+tar cf member.tar -C s3 l l/g
+echo viaD > s3/d/g
+tar rf member.tar -C s3 d/g
+echo one > s4/a/l/f
+echo two > s5/d/f
+tar cf deep.tar -C s4 a/l/f
+tar rf deep.tar -C s5 d/f
+i=0
+while test $i -lt 10; do
+  rm -rf dst; mkdir dst dst/d
+  ln -s d dst/l
+  timeout 60 tar --parallel -xf pre.tar -C dst || exit 1
+  test "`cat dst/d/f`" = new || { echo "pre $i: `cat dst/d/f`"; exit 1; }
+  rm -rf dst; mkdir dst
+  timeout 60 tar --parallel -xf member.tar -C dst || exit 1
+  test "`cat dst/d/g`" = viaD || { echo "member $i: `cat dst/d/g`"; exit 1; }
+  rm -rf dst; mkdir dst dst/a dst/d
+  ln -s ../d dst/a/l
+  timeout 60 tar --parallel -xf deep.tar -C dst || exit 1
+  test "`cat dst/d/f`" = two || { echo "deep $i: `cat dst/d/f`"; exit 1; }
+  i=`expr $i + 1`
+done
+echo ok
+],
+[0],
+[ok
+])
+
+AT_CLEANUP
+
+# Hard links whose targets lie under two different pre-existing
+# directories: the link waits to learn the kind of both parents, and
+# must hear about both.
+
+AT_SETUP([parallel extraction links into two pre-existing directories])
+AT_KEYWORDS([extract parallel parallel-alias])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+mkdir src src/a src/b src/c
+echo A > src/a/f
+echo C > src/c/f
+ln src/a/f src/b/h1 || AT_SKIP_TEST
+ln src/c/f src/b/h2 || AT_SKIP_TEST
+tar cf archive -C src --no-recursion a b c b/h1 b/h2
+i=0
+while test $i -lt 5; do
+  rm -rf dst; mkdir dst dst/a dst/c
+  echo A > dst/a/f
+  echo C > dst/c/f
+  timeout 60 tar --parallel -xf archive -C dst || exit 1
+  test "`cat dst/b/h1`" = A || exit 1
+  test "`cat dst/b/h2`" = C || exit 1
+  i=`expr $i + 1`
+done
+echo ok
+],
+[0],
+[ok
+])
+
+AT_CLEANUP

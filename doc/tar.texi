@@ -272,6 +272,7 @@ Changing How @command{tar} Writes Files
 * Data Modification Times::
 * Setting Access Permissions::
 * Directory Modification Times and Permissions::
+* Parallel Extraction::
 * Writing to Standard Output::
 * Writing to an External Program::
 * remove files::
@@ -3329,6 +3330,37 @@ in the @var{file}.
 
 This option does not affect extraction from archives.
 
+@opsummary{parallel}
+@item --parallel
+
+Extract with the parallel engine, which creates files, directories and
+links through io_uring with many operations in flight and restores
+timestamps from an auto-scaling pool of threads.  This is the default
+where supported.  @xref{Parallel Extraction}.
+
+@opsummary{no-parallel}
+@item --no-parallel
+
+Extract members one at a time.  @xref{Parallel Extraction}.
+
+@opsummary{parallel-open-files}
+@item --parallel-open-files=@var{number}
+
+Parallel extraction: keep at most @var{number} files open at once,
+i.e., that many members in flight.  @xref{Parallel Extraction}.
+
+@opsummary{parallel-meta-threads}
+@item --parallel-meta-threads=@var{number}
+
+Parallel extraction: start the timestamp-restoring pool with
+@var{number} threads.  @xref{Parallel Extraction}.
+
+@opsummary{parallel-max-meta-threads}
+@item --parallel-max-meta-threads=@var{number}
+
+Parallel extraction: never grow the timestamp-restoring pool beyond
+@var{number} threads.  @xref{Parallel Extraction}.
+
 @opsummary{pax-option}
 @item --pax-option=@var{keyword-list}
 This option enables creation of the archive in @acronym{POSIX.1-2001}
@@ -6048,6 +6080,7 @@ encountered while reading an archive.  Use in conjunction with
 * Data Modification Times::
 * Setting Access Permissions::
 * Directory Modification Times and Permissions::
+* Parallel Extraction::
 * Writing to Standard Output::
 * Writing to an External Program::
 * remove files::
@@ -6334,6 +6367,90 @@ Cancel the effect of the previous @option{--delay-directory-restore}.
 Use this option if you have used @option{--delay-directory-restore} in
 @env{TAR_OPTIONS} variable (@pxref{TAR_OPTIONS}) and wish to
 temporarily disable it.
+@end table
+
+@node Parallel Extraction
+@unnumberedsubsubsec Parallel Extraction
+@cindex parallel extraction
+@cindex io_uring
+@opindex parallel
+@opindex no-parallel
+
+Extracting a member means several filesystem operations: creating the
+file, writing its data, restoring its timestamps and permissions, and
+closing it.  On a network filesystem each of these is a round-trip to
+the server, so extracting an archive one member at a time can be very
+slow even though almost no data is transferred.
+
+On GNU/Linux, when @command{tar} was built with @samp{liburing},
+extraction proceeds in parallel: file creation, directory creation,
+links and closes are submitted through @code{io_uring}, so that
+thousands of them can be in flight at once, while a pool of threads
+restores timestamps and permissions.  That pool starts small and grows
+as long as work is queued and adding threads keeps increasing the rate
+at which members complete; it stops growing once the filesystem is
+saturated.  The result is identical to sequential extraction:
+directories are created before their contents, hard links are created
+after their targets, existing files are handled according to the
+options described in @ref{Dealing with Old Files}, and directory
+permissions and modification times are restored after the directory's
+contents, as if @option{--delay-directory-restore} had been given
+(@pxref{Directory Modification Times and Permissions}).
+
+Parallel extraction is the default whenever it can be used.  Members
+that require the ordinary code path (sparse members, hard links that
+need placeholders, dump directories) are extracted one at a time
+without disturbing the rest.  Different names can refer to the same
+object when a parent directory is a symbolic link, or already existed
+in the destination; members below such a parent are extracted one at
+a time, in archive order, so that the result is what a sequential
+extraction produces.  Changing @option{-C} destinations waits for
+earlier members to finish.
+The whole run is sequential with
+@option{--to-stdout}, @option{--to-command}, extended attributes,
+ACLs or SELinux contexts, incremental archives, @option{--backup},
+@option{--interactive}, @option{--keep-newer-files}, @option{--overwrite},
+@option{--unlink-first}, @option{--absolute-names},
+@option{--dereference}, @option{--recursive-unlink}, multi-volume
+archives and @option{--one-top-level}, as well as on systems where
+@code{io_uring} or the operations the engine needs are unavailable, or
+when too few file descriptors are available.  With
+@option{--absolute-names}, extraction is sequential because absolute
+and relative names may denote the same object.
+
+When @command{tar} is built without the engine, the parallel options
+are omitted from @option{--help} and @option{--usage}.  They remain
+recognized for compatibility: @option{--no-parallel} is harmless, and
+requests to enable or tune parallel extraction issue a warning and
+leave extraction sequential.
+
+@table @option
+@opindex no-parallel
+@item --no-parallel
+Extract members one at a time, as previous versions did.
+
+@opindex parallel
+@item --parallel
+Use the parallel engine; complain if it cannot be used.
+
+@opindex parallel-open-files
+@item --parallel-open-files=@var{number}
+Keep at most @var{number} files and symbolic links open at once, which
+bounds the number of members in flight.  The default leaves room for
+the other descriptors the engine needs within the current limit on
+open file descriptors, and is at most 16384.  @command{tar} does not
+raise that limit; when it is too low for the engine, members are
+extracted one at a time.
+
+@opindex parallel-meta-threads
+@item --parallel-meta-threads=@var{number}
+Start the timestamp-restoring pool with @var{number} threads.  The
+default is 4, or 32 when the destination is on a network filesystem.
+
+@opindex parallel-max-meta-threads
+@item --parallel-max-meta-threads=@var{number}
+Never grow the pool beyond @var{number} threads.  The default is
+1024, or fewer when file descriptors are scarce.
 @end table
 
 @node Writing to Standard Output
