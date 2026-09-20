@@ -399,8 +399,6 @@ extern bool delay_directory_restore_option;
 /* Parallel extraction (see parallel.c).  -1 = auto, 0 = off, 1 = on.  */
 extern int parallel_option;
 extern idx_t parallel_open_files_option;
-extern idx_t parallel_meta_threads_option;
-extern idx_t parallel_max_meta_threads_option;
 
 /* Declarations for each module.  */
 
@@ -565,7 +563,7 @@ extern dev_t root_device;
 
 void extr_init (void);
 
-/* Module parallel.c: the parallel (io_uring) extraction engine.
+/* Module parallel.c: the single-threaded io_uring extraction engine.
    Built only if configure found liburing (TAR_PARALLEL); otherwise the
    hooks below are no-ops and extraction is always sequential.  */
 

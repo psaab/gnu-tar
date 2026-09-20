@@ -613,9 +613,8 @@ delay_set_stat (char const *file_name, struct tar_stat_info const *st,
 #if TAR_PARALLEL
 /* Record a directory created by the parallel engine.  ST is null for
    intermediate directories not mentioned in the archive.  REAL_ST, if
-   not null, is the directory's actual status (needed when it replaces
-   an intermediate-directory entry; the engine runs off the main thread
-   and cannot stat relative to the current directory).  */
+   not null, supplies the directory's actual status when replacing an
+   intermediate-directory entry, avoiding another status lookup.  */
 void
 parallel_record_directory (char const *file_name, struct stat const *st,
 			   struct timespec atime, struct timespec mtime,
@@ -2374,7 +2373,8 @@ extract_finish (void)
   if (parallel_active)
     {
       parallel_finish ();
-      apply_delayed_set_stat_parallel ();
+      if (parallel_active)
+        apply_delayed_set_stat_parallel ();
       parallel_shutdown ();
     }
 #endif

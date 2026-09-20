@@ -24,6 +24,7 @@ AM_INSTALLCHECK_STD_OPTIONS_EXEMPT=backup.sh dump-remind
 sbin_SCRIPTS=@BACKUP_SBIN_SCRIPTS@
 EXTRA_SCRIPTS=tarcat
 EXTRA_DIST=\
+ benchmark-parallel-extract\
  backup.sh.in\
  backup.in\
  restore.in\

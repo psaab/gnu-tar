@@ -35,13 +35,15 @@ fi
 
 for display in --help --usage; do
   tar "$display" > display.out || exit 1
-  for option in parallel no-parallel parallel-open-files \
-                parallel-meta-threads parallel-max-meta-threads; do
+  for option in parallel no-parallel parallel-open-files; do
     if grep -F -- "--$option" display.out > /dev/null; then
       test "$supported" = yes || exit 1
     else
       test "$supported" = no || exit 1
     fi
+  done
+  for option in parallel-meta-threads parallel-max-meta-threads; do
+    grep -F -- "--$option" display.out > /dev/null && exit 1
   done
 done
 
@@ -68,6 +70,7 @@ if test -s probe.err; then
     || exit 1
 fi
 
+: > combined.expected
 for option in parallel-open-files parallel-meta-threads \
               parallel-max-meta-threads; do
   for value in 0 -1 '' \
@@ -80,11 +83,23 @@ for option in parallel-open-files parallel-meta-threads \
     grep -q 'not supported by this build' invalid.err && exit 1
   done
 
-  # Valid tuning is silent when supported.  Otherwise it must give the
-  # same warning as --parallel instead of silently accepting a no-op.
+  # Open-file tuning is silent when supported.  The compatibility-only
+  # thread options warn once each; engine-less builds retain the same
+  # diagnostic as --parallel for every tuning option.
   tar "--$option=1" -cf /dev/null -T /dev/null 2>valid.err || exit 1
-  cmp probe.err valid.err || exit 1
+  if test "$option" = parallel-open-files || test -s probe.err; then
+    cmp probe.err valid.err || exit 1
+  else
+    echo "tar: --$option: metadata threads are not supported by this build;" \
+      "ignoring option" > expected.err
+    cmp expected.err valid.err || exit 1
+  fi
+  cat valid.err >> combined.expected
 done
+tar --parallel-open-files=1 --parallel-meta-threads=1 \
+  --parallel-max-meta-threads=1 -cf /dev/null -T /dev/null \
+  2>combined.err || exit 1
+cmp combined.expected combined.err || exit 1
 echo ok
 ],
 [0],

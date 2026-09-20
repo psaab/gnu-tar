@@ -44,7 +44,7 @@ tar cf archive -C src -T names || exit 1
 echo existing > dst/big
 
 timeout 60 tar -xf archive --parallel --parallel-open-files=4 \
-  --parallel-max-meta-threads=1 --skip-old-files -C dst || exit 1
+  --skip-old-files -C dst || exit 1
 test -f dst/empty0 && test -f dst/empty49999 || exit 1
 cat dst/big
 ],
@@ -127,8 +127,8 @@ ls dst | wc -l | tr -d ' '
 
 AT_CLEANUP
 
-# A tight address-space limit leaves little room for threads and
-# buffers; extraction must still succeed, with the engine or without.
+# A tight address-space limit leaves little room for buffers;
+# extraction must still succeed, with the engine or without.
 
 AT_SETUP([parallel extraction under an address-space limit])
 AT_KEYWORDS([extract parallel parallel-budget])

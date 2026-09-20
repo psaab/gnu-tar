@@ -370,19 +370,21 @@ AS_IF([test "$with_liburing" != no],
   [AS_IF([test "$with_liburing" != yes],
      [CPPFLAGS="$CPPFLAGS -I$with_liburing/include"
       LDFLAGS="$LDFLAGS -L$with_liburing/lib"])
-   # The engine needs the openat2/mkdirat/symlinkat/linkat helpers,
-   # ring probing, timed waits and worker limits: liburing 2.2 or later.
+   # The engine needs the openat2/mkdirat/symlinkat/linkat/write helpers,
+   # ring probing, completion waits and worker limits.
    AC_DEFUN([tar_LIBURING_PROGRAM],
      [AC_LANG_PROGRAM([[#include <liburing.h>
        #include <fcntl.h>]],
        [[struct io_uring r; struct io_uring_params p = {0};
-	 struct io_uring_cqe *cqe; struct __kernel_timespec ts = {0};
+	 struct io_uring_cqe *cqe;
 	 struct open_how how = {0}; unsigned w[2] = {8, 8};
 	 p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN
 		   | IORING_SETUP_CQSIZE;
 	 if (io_uring_queue_init_params (8, &r, &p) < 0) return 1;
 	 struct io_uring_probe *pr = io_uring_get_probe_ring (&r);
-	 if (pr && ! io_uring_opcode_supported (pr, IORING_OP_LINKAT)) return 1;
+	 if (pr && (! io_uring_opcode_supported (pr, IORING_OP_LINKAT)
+		    || ! io_uring_opcode_supported (pr, IORING_OP_WRITE)))
+	   return 1;
 	 io_uring_free_probe (pr);
 	 io_uring_register_iowq_max_workers (&r, w);
 	 struct io_uring_sqe *s = io_uring_get_sqe (&r);
@@ -390,11 +392,12 @@ AS_IF([test "$with_liburing" != no],
 	 io_uring_prep_mkdirat (s, AT_FDCWD, "d", 0700);
 	 io_uring_prep_symlinkat (s, "t", AT_FDCWD, "l");
 	 io_uring_prep_linkat (s, AT_FDCWD, "a", AT_FDCWD, "b", 0);
+	 io_uring_prep_write (s, 0, "", 0, 0);
 	 io_uring_prep_close (s, 0);
 	 io_uring_sqe_set_data64 (s, 0);
-	 (void) io_uring_cqe_get_data64 (cqe);
-	 if (io_uring_submit_and_wait_timeout (&r, &cqe, 1, &ts, NULL) < 0)
+	 if (io_uring_submit (&r) < 0 || io_uring_wait_cqe (&r, &cqe) < 0)
 	   return 1;
+	 (void) io_uring_cqe_get_data64 (cqe);
 	 io_uring_queue_exit (&r);
 	 return 0;]])])
    tar_liburing_static=no
@@ -413,8 +416,7 @@ AS_IF([test "$with_liburing" != no],
 	[LIBS=$tar_save_LIBS])
       AC_MSG_RESULT([$tar_parallel])])])
 AS_IF([test $tar_parallel = yes],
-  [AC_SEARCH_LIBS([pthread_create], [pthread])
-   AC_DEFINE([TAR_PARALLEL], [1],
+  [AC_DEFINE([TAR_PARALLEL], [1],
      [Define to 1 to build the parallel (io_uring) extraction engine.])])
 AM_CONDITIONAL([TAR_PARALLEL], [test $tar_parallel = yes])
 

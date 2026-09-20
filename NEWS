@@ -3,14 +3,13 @@ Please send GNU tar bug reports to <bug-tar@gnu.org>
 
 version 1.35.90 (git)
 
-* Parallel extraction
+* Thread-free parallel extraction prototype
 
 On GNU/Linux, when tar is built with liburing, extraction (-x) now
-creates files, directories and links through io_uring with many
-operations in flight, and restores timestamps from a pool of threads
-that grows while doing so still increases throughput.  Output is the
-same as before; on network filesystems, where every metadata call is
-a round-trip, extraction is many times faster.  Members that need the
+creates files, directories and links and writes file data through
+io_uring with many operations in flight.  This prototype uses a single
+application thread; timestamps, ownership and permissions are restored
+synchronously, without a metadata thread pool.  Members that need the
 ordinary code path (sparse files, link placeholders, dump directories)
 and runs using --to-stdout, --to-command, xattrs/ACLs/SELinux,
 incremental archives, --backup, --interactive, --keep-newer-files,
@@ -25,13 +24,16 @@ Members below a parent that is a symbolic link, or that already existed
 in the destination, are extracted one at a time in archive order, since
 different names may then refer to the same object; changing -C
 destinations waits for earlier members to finish.
-New options: --parallel, --no-parallel,
---parallel-open-files=N, --parallel-meta-threads=N and
---parallel-max-meta-threads=N; see the manual.  Configure with
---with-liburing[=DIR] to prefer static liburing linking, falling back to
-shared linking when necessary; --without-liburing builds tar without
-the engine.  Builds without the engine hide these options from help;
-explicit requests to enable or tune it warn and extract sequentially.
+New options: --parallel, --no-parallel and --parallel-open-files=N;
+see the manual.  The former --parallel-meta-threads=N and
+--parallel-max-meta-threads=N options are hidden from help and usage,
+but remain recognized for compatibility.  In builds with the engine,
+each explicit use warns that metadata threads are unavailable and ignores
+the setting.  Configure with --with-liburing[=DIR] to prefer static
+liburing linking, falling back to shared linking when necessary;
+--without-liburing builds tar without the engine.  Builds without the
+engine hide these options from help and usage; explicit requests to
+enable or tune it warn and extract sequentially.
 
 * New manual section "Reproducibility", for reproducible tarballs.
 

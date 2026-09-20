@@ -53,7 +53,7 @@ test "`ls -i recovered/d/f | sed 's/ .*//'`" = \
      "`ls -i recovered/d/h | sed 's/ .*//'`" || exit 1
 
 # Unexpected errors must terminate with tar's failure status, without
-# double-freeing a job, waiting forever, or invoking a self-joining hook.
+# double-freeing a job or waiting forever.
 # Persistent ENOMEM must likewise terminate after bounded retries.
 for fault in EIO ENOMEM; do
   mkdir failed-$fault
@@ -68,17 +68,23 @@ for fault in EIO ENOMEM; do
 done
 echo ok
 
-# The parser may be blocked reading the archive when the ring fails;
-# tar must still exit promptly.
+# A submission failure while extracting FIFO input must terminate
+# promptly even while the producer keeps the pipe open.  The main
+# thread observes the error when submitting, not during a blocked read.
 mkfifo pipe || AT_SKIP_TEST
-(cat archive; sleep 30) > pipe &
-mkdir blocked
+(cat archive; exec sleep 30) > pipe &
+producer=$!
+mkdir piped
 timeout 20 strace -qq -f -o pipe.trace -e trace=io_uring_enter \
   -e inject=io_uring_enter:error=EIO:when=2+ \
-  tar --parallel -xf pipe -C blocked 2>pipe.err
+  tar --parallel -xf pipe -C piped 2>pipe.err
 status=$?
-kill $! 2>/dev/null
+kill $producer 2>/dev/null
+wait $producer 2>/dev/null
 test $status -eq 2 || { echo "status $status"; cat pipe.err; exit 1; }
+grep -q '(INJECTED)' pipe.trace || exit 1
+grep -q 'io_uring .* failed:' pipe.err || exit 1
+grep -q 'Error is not recoverable' pipe.err || exit 1
 echo pipe ok
 ],
 [0],

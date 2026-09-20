@@ -121,6 +121,7 @@ TESTSUITE_AT = \
  parallel-failure.at\
  parallel-metadata.at\
  parallel-options.at\
+ parallel-write.at\
  extrac02.at\
  extrac03.at\
  extrac04.at\

@@ -1,0 +1,192 @@
+#!/bin/sh
+# Compare the threaded and thread-free extraction engines.
+# Copyright 2026 Free Software Foundation, Inc.
+#
+# This file is part of GNU tar.
+#
+# GNU tar is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# GNU tar is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+set -eu
+
+usage ()
+{
+  printf '%s\n' \
+    "Usage: $0 [--synthetic-delay=5ms] THREADED-TAR THREAD-FREE-TAR" \
+    'Run three local extraction trials on 5201 archive members.' \
+    'Optionally inject a delay into timestamp syscalls using strace.' \
+    'Keep binaries, results, and extracted files in a fresh temporary directory.'
+}
+
+delay=
+case ${1-} in
+  --help) usage; exit 0;;
+  --synthetic-delay=*) delay=${1#*=}; shift;;
+esac
+if test "$#" -ne 2; then
+  usage >&2
+  exit 2
+fi
+command -v python3 >/dev/null
+test -x /usr/bin/time
+if test -n "$delay"; then
+  command -v strace >/dev/null
+fi
+umask 022
+workdir=`mktemp -d "${TMPDIR:-/tmp}/tar-extract-benchmark.XXXXXX"`
+printf 'Benchmark files retained in %s\n' "$workdir"
+
+python3 - "$1" "$2" "$workdir" "$delay" <<'PY'
+import csv
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import statistics
+import subprocess
+import sys
+import tarfile
+
+scratch = Path(sys.argv[3]).resolve()
+delay = sys.argv[4]
+if delay and not re.fullmatch(r"[1-9][0-9]*(?:us|ms|s)", delay):
+    raise SystemExit("delay must be a positive integer followed by us, ms, or s")
+
+environment = os.environ.copy()
+environment["LC_ALL"] = "C"
+environment.pop("TAR_OPTIONS", None)
+binaries = {}
+description = {"kernel": " ".join(os.uname()), "uid": os.geteuid(),
+               "filesystem": subprocess.check_output(
+                   ["df", "-T", str(scratch)], text=True, env=environment),
+               "synthetic_delay": delay, "binaries": {}}
+for label, argument in zip(("threaded", "nothreads"), sys.argv[1:3]):
+    source = Path(argument).resolve(strict=True)
+    if not source.is_file() or not os.access(source, os.X_OK):
+        raise SystemExit(f"not an executable file: {source}")
+    binary = scratch / f"tar-{label}"
+    shutil.copy2(source, binary)
+    binaries[label] = binary
+    description["binaries"][label] = {
+        "source": str(source),
+        "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+(scratch / "environment.json").write_text(json.dumps(description, indent=2) + "\n")
+
+empty_archive = scratch / "empty.tar"
+with tarfile.open(empty_archive, "w", format=tarfile.GNU_FORMAT):
+    pass
+for label, binary in binaries.items():
+    run = scratch / f"{label}-preflight"
+    destination = run / "out"
+    destination.mkdir(parents=True)
+    result = subprocess.run([str(binary), "--parallel", "-xf", str(empty_archive),
+                             "-C", str(destination)], env=environment,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (run / "stdout.txt").write_bytes(result.stdout)
+    (run / "stderr.txt").write_bytes(result.stderr)
+    if result.returncode or result.stderr:
+        raise SystemExit(f"{label}: explicit parallel preflight failed; see {run}")
+
+archive_path = scratch / "fixture.tar"
+with tarfile.open(archive_path, "w", format=tarfile.GNU_FORMAT) as archive:
+    for directory in range(-1, 200):
+        name = "." if directory < 0 else f"d{directory:03d}"
+        member = tarfile.TarInfo(name)
+        member.type = tarfile.DIRTYPE
+        member.mode = 0o755
+        member.mtime = 1000000000 + max(directory, 0)
+        archive.addfile(member)
+        if directory < 0:
+            continue
+        for number in range(25):
+            data = (f"{directory:03d}/{number:02d}\n".encode() * 37)[:256]
+            member = tarfile.TarInfo(f"{name}/f{number:02d}")
+            member.mode = 0o644
+            member.mtime = 1000000000 + directory * 25 + number
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+
+with tarfile.open(archive_path) as archive:
+    expected = [(member, archive.extractfile(member).read()
+                 if member.isfile() else None) for member in archive]
+
+owners = {}
+
+def verify(destination, touch):
+    for member, data in expected:
+        path = destination / member.name
+        info = path.stat()
+        assert stat.S_IMODE(info.st_mode) == member.mode, path
+        if not touch:
+            assert info.st_mtime_ns == member.mtime * 1000000000, path
+        identity = (info.st_uid, info.st_gid)
+        assert owners.setdefault(member.name, identity) == identity, path
+        if data is None:
+            assert stat.S_ISDIR(info.st_mode), path
+        else:
+            assert stat.S_ISREG(info.st_mode), path
+            assert info.st_size == member.size and path.read_bytes() == data, path
+
+modes = {"default": [], "touch": ["--touch"],
+         "sequential": ["--no-parallel"],
+         "sequential-touch": ["--no-parallel", "--touch"]}
+results = []
+with (scratch / "results.csv").open("w", newline="") as output:
+    writer = csv.writer(output)
+    writer.writerow(("binary", "phase", "mode", "trial", "elapsed_s",
+                     "user_s", "system_s", "maxrss_kb"))
+    for phase in ("local", "synthetic") if delay else ("local",):
+        for mode in modes:
+            if phase == "local" and mode == "sequential-touch":
+                continue
+            trials = 3 if phase == "local" or mode == "default" else 1
+            for trial in range(1, trials + 1):
+                for label, binary in binaries.items():
+                    run = scratch / f"{label}-{phase}-{mode}-{trial}"
+                    destination = run / "out"
+                    destination.mkdir(parents=True)
+                    command = [str(binary), "-xf", str(archive_path),
+                               "-C", str(destination)] + modes[mode]
+                    if phase == "synthetic":
+                        command = ["strace", "-f", "-qq", "-c", "-w", "-e",
+                                   "trace=utimensat,io_uring_setup,clone,clone3",
+                                   "-e", f"inject=utimensat:delay_enter={delay}",
+                                   "-o", str(run / "strace.txt")] + command
+                    command = ["/usr/bin/time", "-f", "%e %U %S %M", "-o",
+                               str(run / "time.txt")] + command
+                    with (run / "stdout.txt").open("w") as stdout, \
+                         (run / "stderr.txt").open("w") as stderr:
+                        subprocess.run(command, stdout=stdout, stderr=stderr,
+                                       env=environment, check=True)
+                    timing = (run / "time.txt").read_text().split()
+                    row = (label, phase, mode, trial, *timing)
+                    writer.writerow(row)
+                    output.flush()
+                    verify(destination, "--touch" in modes[mode])
+                    results.append((label, phase, mode, float(timing[0])))
+                    print(f"{label} {phase} {mode} {trial}: {timing[0]} s; "
+                          "all 5201 members verified", flush=True)
+
+print("\nWall time: median [minimum, maximum], seconds")
+for label, phase, mode in dict.fromkeys(row[:3] for row in results):
+    elapsed = [row[3] for row in results if row[:3] == (label, phase, mode)]
+    print(f"{label} {phase} {mode}: {statistics.median(elapsed):.2f} "
+          f"[{min(elapsed):.2f}, {max(elapsed):.2f}]")
+if delay:
+    print("Synthetic delays affect userspace timestamp syscalls only, "
+          "not io_uring operations or real network filesystem latency.")
+PY

@@ -3334,9 +3334,10 @@ This option does not affect extraction from archives.
 @item --parallel
 
 Extract with the parallel engine, which creates files, directories and
-links through io_uring with many operations in flight and restores
-timestamps from an auto-scaling pool of threads.  This is the default
-where supported.  @xref{Parallel Extraction}.
+links and writes file data through io_uring with many operations in
+flight.  This prototype uses a single application thread and restores
+metadata synchronously.  This is the default where supported.
+@xref{Parallel Extraction}.
 
 @opsummary{no-parallel}
 @item --no-parallel
@@ -3352,14 +3353,14 @@ i.e., that many members in flight.  @xref{Parallel Extraction}.
 @opsummary{parallel-meta-threads}
 @item --parallel-meta-threads=@var{number}
 
-Parallel extraction: start the timestamp-restoring pool with
-@var{number} threads.  @xref{Parallel Extraction}.
+Accepted for compatibility, but ignored with a warning: this prototype
+has no metadata thread pool.  @xref{Parallel Extraction}.
 
 @opsummary{parallel-max-meta-threads}
 @item --parallel-max-meta-threads=@var{number}
 
-Parallel extraction: never grow the timestamp-restoring pool beyond
-@var{number} threads.  @xref{Parallel Extraction}.
+Accepted for compatibility, but ignored with a warning: this prototype
+has no metadata thread pool.  @xref{Parallel Extraction}.
 
 @opsummary{pax-option}
 @item --pax-option=@var{keyword-list}
@@ -6383,19 +6384,25 @@ the server, so extracting an archive one member at a time can be very
 slow even though almost no data is transferred.
 
 On GNU/Linux, when @command{tar} was built with @samp{liburing},
-extraction proceeds in parallel: file creation, directory creation,
-links and closes are submitted through @code{io_uring}, so that
-thousands of them can be in flight at once, while a pool of threads
-restores timestamps and permissions.  That pool starts small and grows
-as long as work is queued and adding threads keeps increasing the rate
-at which members complete; it stops growing once the filesystem is
-saturated.  The result is identical to sequential extraction:
+this prototype submits file creation, directory creation, links,
+writes and closes through @code{io_uring}, so that many operations can
+be in flight at once.  The engine uses a single application thread;
+timestamps, ownership and permissions are restored synchronously,
+without a metadata thread pool.  The result is identical to sequential
+extraction:
 directories are created before their contents, hard links are created
 after their targets, existing files are handled according to the
 options described in @ref{Dealing with Old Files}, and directory
 permissions and modification times are restored after the directory's
 contents, as if @option{--delay-directory-restore} had been given
 (@pxref{Directory Modification Times and Permissions}).
+
+Timestamps are restored one member at a time, so their latency can
+dominate extraction on a remote filesystem.  @option{--touch} omits
+timestamp restoration, at the cost of not preserving archive times.
+The kernel continues submitted requests while the archive parser waits
+for input, but new dependent requests and completion diagnostics wait
+until the parser resumes.
 
 Parallel extraction is the default whenever it can be used.  Members
 that require the ordinary code path (sparse members, hard links that
@@ -6424,6 +6431,12 @@ recognized for compatibility: @option{--no-parallel} is harmless, and
 requests to enable or tune parallel extraction issue a warning and
 leave extraction sequential.
 
+The metadata-thread options from the threaded engine are also omitted
+from @option{--help} and @option{--usage} in this prototype.  They are
+recognized for compatibility.  In builds with the engine, each explicit
+use warns that metadata threads are unavailable and ignores the setting.
+This does not disable asynchronous extraction when the engine is available.
+
 @table @option
 @opindex no-parallel
 @item --no-parallel
@@ -6444,13 +6457,15 @@ extracted one at a time.
 
 @opindex parallel-meta-threads
 @item --parallel-meta-threads=@var{number}
-Start the timestamp-restoring pool with @var{number} threads.  The
-default is 4, or 32 when the destination is on a network filesystem.
+Accepted for compatibility.  @var{number} must be positive, but the
+setting is ignored with a warning because this prototype has no
+metadata thread pool.
 
 @opindex parallel-max-meta-threads
 @item --parallel-max-meta-threads=@var{number}
-Never grow the pool beyond @var{number} threads.  The default is
-1024, or fewer when file descriptors are scarce.
+Accepted for compatibility.  @var{number} must be positive, but the
+setting is ignored with a warning because this prototype has no
+metadata thread pool.
 @end table
 
 @node Writing to Standard Output

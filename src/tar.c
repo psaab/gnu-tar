@@ -63,8 +63,6 @@ bool keep_directory_symlink_option;
 /* Parallel extraction (see parallel.c): -1 auto, 0 off, 1 on.  */
 int parallel_option = -1;
 idx_t parallel_open_files_option;
-idx_t parallel_meta_threads_option;
-idx_t parallel_max_meta_threads_option;
 const char *listed_incremental_option;
 signed char incremental_level;
 bool check_device_option;
@@ -710,14 +708,12 @@ static struct argp_option options[] = {
    N_("parallel extraction: keep at most NUMBER files open at once"
       " (default: from the open-files limit)"), GRID_FATTR },
   {"parallel-meta-threads", PARALLEL_META_THREADS_OPTION, N_("NUMBER"),
-   PARALLEL_OPTION_FLAGS,
-   N_("parallel extraction: start the timestamp-restoring thread pool"
-      " with NUMBER threads (default 4, or 32 on network filesystems)"),
+   OPTION_HIDDEN,
+   N_("accepted for compatibility; ignored"),
    GRID_FATTR },
   {"parallel-max-meta-threads", PARALLEL_MAX_META_THREADS_OPTION,
-   N_("NUMBER"), PARALLEL_OPTION_FLAGS,
-   N_("parallel extraction: never grow that pool beyond NUMBER threads"
-      " (default 1024)"), GRID_FATTR },
+   N_("NUMBER"), OPTION_HIDDEN,
+   N_("accepted for compatibility; ignored"), GRID_FATTR },
   {"no-delay-directory-restore", NO_DELAY_DIRECTORY_RESTORE_OPTION, NULL, 0,
    N_("cancel the effect of --delay-directory-restore option"), GRID_FATTR },
   {"sort", SORT_OPTION, N_("ORDER"), 0,
@@ -1974,10 +1970,11 @@ parse_opt (int key, char *arg, struct argp_state *state)
 #if TAR_PARALLEL
 	if (key == PARALLEL_OPEN_FILES_OPTION)
 	  parallel_open_files_option = n;
-	else if (key == PARALLEL_META_THREADS_OPTION)
-	  parallel_meta_threads_option = n;
 	else
-	  parallel_max_meta_threads_option = n;
+	  paxwarn (0, _("%s: metadata threads are not supported by this build;"
+			" ignoring option"),
+		   key == PARALLEL_META_THREADS_OPTION
+		   ? "--parallel-meta-threads" : "--parallel-max-meta-threads");
 #else
 	paxwarn (0, _("parallel extraction is not supported by this build;"
 		      " extracting sequentially"));
