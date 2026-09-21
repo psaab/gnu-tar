@@ -345,6 +345,38 @@ Overwrite existing files when extracting.
 \fB\-\-overwrite\-dir\fR
 Overwrite metadata of existing directories when extracting (default).
 .TP
+\fB\-\-parallel\fR
+Extract with the parallel engine: files, directories and links are
+created through
+.BR io_uring (7)
+with many operations in flight.  The default build uses a single
+application thread, submits file data writes through io_uring, and
+restores metadata synchronously.  Configuring with
+.B \-\-with\-pthreads
+selects an alternative engine with I/O, writer and metadata worker
+threads.
+This is the default on GNU/Linux when
+.B tar
+was built with liburing and the options in use allow it.
+.TP
+\fB\-\-no\-parallel\fR
+Extract members one at a time.
+.TP
+\fB\-\-parallel\-open\-files\fR=\fINUMBER\fR
+Parallel extraction: keep at most \fINUMBER\fR files open at once
+(default: derived from the open-files limit, at most 16384).
+.TP
+\fB\-\-parallel\-meta\-threads\fR=\fINUMBER\fR
+Parallel extraction: initial size of the timestamp-restoring thread
+pool in builds configured with \fB\-\-with\-pthreads\fR
+(default 4, or 32 on network filesystems).
+Otherwise, accepted for compatibility but ignored with a warning.
+.TP
+\fB\-\-parallel\-max\-meta\-threads\fR=\fINUMBER\fR
+Parallel extraction: upper bound of that pool in builds configured with
+\fB\-\-with\-pthreads\fR (default 1024).
+Otherwise, accepted for compatibility but ignored with a warning.
+.TP
 \fB\-\-recursive\-unlink\fR
 Recursively remove all files in the directory prior to extracting it.
 .TP

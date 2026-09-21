@@ -1,0 +1,128 @@
+# Process this file with autom4te to create testsuite. -*- Autotest -*-
+
+# Test suite for GNU tar.
+# Copyright 2026 Free Software Foundation, Inc.
+
+# This file is part of GNU tar.
+
+# GNU tar is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+# GNU tar is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# A member larger than the available buffer budget must make progress
+# with either backend.  Distinct megabyte blocks detect reordered
+# chunks; the final short chunk and following members exercise buffer
+# lifetime and archive alignment.
+
+AT_SETUP([parallel extraction streams writes within its buffer budget])
+AT_KEYWORDS([extract parallel parallel-write parallel-budget])
+
+AT_TAR_CHECK([
+AT_SKIP_LARGE_FILES
+AT_PARALLEL_RUNTIME_PREREQ
+(ulimit -v 65536) 2>/dev/null || AT_SKIP_TEST
+mkdir src dst
+genfile --sparse --quiet --block-size=1048576 --file src/big \
+  0 ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef || exit 1
+printf end >> src/big
+chmod 640 src/big
+ln src/big src/hard || AT_SKIP_TEST
+genfile --length=0 --file src/empty
+genfile --length=1048593 --file src/tail
+tar --mtime=@1000000000 -cf archive -C src big hard empty tail || exit 1
+(ulimit -v 65536 && timeout 60 tar --parallel --parallel-open-files=4 \
+  -xpf archive -C dst) 2>err || { cat err; exit 1; }
+test ! -s err || { cat err; exit 1; }
+cmp src/big dst/big || exit 1
+cmp src/hard dst/hard || exit 1
+cmp src/empty dst/empty || exit 1
+cmp src/tail dst/tail || exit 1
+test "`ls -i dst/big | sed 's/ .*//'`" = \
+     "`ls -i dst/hard | sed 's/ .*//'`" || exit 1
+genfile --stat=size,mode.777,mtime dst/big
+],
+[0],
+[33554435 640 1000000000
+],
+[], [], [], [gnu])
+
+AT_CLEANUP
+
+# The build's advertised metadata-thread support must agree with its
+# runtime behavior.  Observe real io_uring submissions as well, so an
+# unnoticed sequential fallback cannot make this test pass.
+
+AT_SETUP([parallel extraction uses the selected threading backend])
+AT_KEYWORDS([extract parallel parallel-write parallel-threading])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+strace -qq -o probe.trace -e trace=clone,clone3,io_uring_enter true \
+  2>/dev/null || AT_SKIP_TEST
+tar --help > help.out || exit 1
+mkdir src dst
+genfile --length=3145745 --file src/big
+tar cf archive -C src big || exit 1
+timeout 60 strace -qq -f -o extract.trace \
+  -e trace=clone,clone3,io_uring_enter \
+  tar --parallel -xf archive -C dst 2>err || exit 1
+test ! -s err || { cat err; exit 1; }
+grep -q 'io_uring_enter' extract.trace || exit 1
+if grep -F -- '--parallel-meta-threads' help.out > /dev/null; then
+  grep 'CLONE_THREAD' extract.trace > /dev/null || exit 1
+else
+  grep 'clone' extract.trace && exit 1
+fi
+cmp src/big dst/big || exit 1
+echo ok
+],
+[0],
+[ok
+],
+[], [], [], [gnu])
+
+AT_CLEANUP
+
+# A file-size limit not aligned to a data chunk causes a real partial
+# write followed by EFBIG.  Ignore SIGXFSZ so tar can report the error,
+# release queued buffers and continue with the next archive member.
+
+AT_SETUP([parallel extraction handles short writes and file-size limits])
+AT_KEYWORDS([extract parallel parallel-write parallel-failure])
+
+AT_TAR_CHECK([
+AT_PARALLEL_RUNTIME_PREREQ
+(trap '' XFSZ && ulimit -f 1537) 2>/dev/null || AT_SKIP_TEST
+mkdir src sequential parallel
+genfile --length=3145745 --file src/big
+echo after > src/tail
+tar cf archive -C src big tail || exit 1
+for engine in sequential parallel; do
+  option=--no-parallel
+  test "$engine" = parallel && option=--parallel
+  (trap '' XFSZ && ulimit -f 1537 &&
+   timeout 60 tar "$option" -xf archive -C "$engine") 2>$engine.err
+  test $? -eq 2 || { cat $engine.err; exit 1; }
+  grep 'Wrote only' $engine.err > /dev/null || exit 1
+  cmp src/tail "$engine/tail" || exit 1
+done
+test -s sequential/big || exit 1
+test "`wc -c < sequential/big`" -lt 3145745 || exit 1
+cmp sequential/big parallel/big || exit 1
+echo ok
+],
+[0],
+[ok
+],
+[], [], [], [gnu])
+
+AT_CLEANUP

@@ -59,6 +59,14 @@ bool interactive_option;
 intmax_t occurrence_option;
 enum old_files old_files_option;
 bool keep_directory_symlink_option;
+
+/* Parallel extraction: -1 auto, 0 off, 1 on.  */
+int parallel_option = -1;
+idx_t parallel_open_files_option;
+#if TAR_PARALLEL && TAR_PARALLEL_THREADS
+idx_t parallel_meta_threads_option;
+idx_t parallel_max_meta_threads_option;
+#endif
 const char *listed_incremental_option;
 signed char incremental_level;
 bool check_device_option;
@@ -383,6 +391,11 @@ enum
   NO_AUTO_COMPRESS_OPTION,
   NO_CHECK_DEVICE_OPTION,
   NO_DELAY_DIRECTORY_RESTORE_OPTION,
+  NO_PARALLEL_OPTION,
+  PARALLEL_OPTION,
+  PARALLEL_MAX_META_THREADS_OPTION,
+  PARALLEL_META_THREADS_OPTION,
+  PARALLEL_OPEN_FILES_OPTION,
   NO_IGNORE_COMMAND_ERROR_OPTION,
   NO_OVERWRITE_DIR_OPTION,
   NO_QUOTE_CHARS_OPTION,
@@ -526,6 +539,14 @@ enum
     GRH_OTHER,
     GRID_OTHER        /* Other options */
   };
+
+/* Recognize these options in every build, but advertise them only when
+   the parallel extraction engine is available.  */
+#if TAR_PARALLEL
+# define PARALLEL_OPTION_FLAGS 0
+#else
+# define PARALLEL_OPTION_FLAGS OPTION_HIDDEN
+#endif
 
 static struct argp_option options[] = {
   {NULL, 0, NULL, 0,
@@ -681,6 +702,34 @@ static struct argp_option options[] = {
   {"delay-directory-restore", DELAY_DIRECTORY_RESTORE_OPTION, NULL, 0,
    N_("delay setting modification times and permissions of extracted"
       " directories until the end of extraction"), GRID_FATTR },
+  {"parallel", PARALLEL_OPTION, NULL, PARALLEL_OPTION_FLAGS,
+   N_("extract with the parallel engine (default when possible)"),
+   GRID_FATTR },
+  {"no-parallel", NO_PARALLEL_OPTION, NULL, PARALLEL_OPTION_FLAGS,
+   N_("extract members one at a time"), GRID_FATTR },
+  {"parallel-open-files", PARALLEL_OPEN_FILES_OPTION, N_("NUMBER"),
+   PARALLEL_OPTION_FLAGS,
+   N_("parallel extraction: keep at most NUMBER files open at once"
+      " (default: from the open-files limit)"), GRID_FATTR },
+  {"parallel-meta-threads", PARALLEL_META_THREADS_OPTION, N_("NUMBER"),
+#if TAR_PARALLEL && TAR_PARALLEL_THREADS
+   0,
+   N_("parallel extraction: start the timestamp-restoring thread pool"
+      " with NUMBER threads (default 4, or 32 on network filesystems)"),
+#else
+   OPTION_HIDDEN,
+   N_("accepted for compatibility; ignored"),
+#endif
+   GRID_FATTR },
+  {"parallel-max-meta-threads", PARALLEL_MAX_META_THREADS_OPTION,
+#if TAR_PARALLEL && TAR_PARALLEL_THREADS
+   N_("NUMBER"), 0,
+   N_("parallel extraction: never grow that pool beyond NUMBER threads"
+      " (default 1024)"), GRID_FATTR },
+#else
+   N_("NUMBER"), OPTION_HIDDEN,
+   N_("accepted for compatibility; ignored"), GRID_FATTR },
+#endif
   {"no-delay-directory-restore", NO_DELAY_DIRECTORY_RESTORE_OPTION, NULL, 0,
    N_("cancel the effect of --delay-directory-restore option"), GRID_FATTR },
   {"sort", SORT_OPTION, N_("ORDER"), 0,
@@ -1910,6 +1959,50 @@ parse_opt (int key, char *arg, struct argp_state *state)
 
     case NO_DELAY_DIRECTORY_RESTORE_OPTION:
       delay_directory_restore_option = false;
+      break;
+
+    case PARALLEL_OPTION:
+#if TAR_PARALLEL
+      parallel_option = 1;
+#else
+      paxwarn (0, _("parallel extraction is not supported by this build;"
+		    " extracting sequentially"));
+#endif
+      break;
+
+    case NO_PARALLEL_OPTION:
+      parallel_option = 0;
+      break;
+
+    case PARALLEL_OPEN_FILES_OPTION:
+    case PARALLEL_META_THREADS_OPTION:
+    case PARALLEL_MAX_META_THREADS_OPTION:
+      {
+	char *end;
+	bool overflow;
+	idx_t n = stoint (arg, &end, &overflow, 0, IDX_MAX);
+	if (end == arg || *end || overflow || n <= 0)
+	  paxusage ("%s: %s", quotearg_colon (arg), _("Invalid number"));
+#if TAR_PARALLEL
+	if (key == PARALLEL_OPEN_FILES_OPTION)
+	  parallel_open_files_option = n;
+#if TAR_PARALLEL_THREADS
+	else if (key == PARALLEL_META_THREADS_OPTION)
+	  parallel_meta_threads_option = n;
+	else
+	  parallel_max_meta_threads_option = n;
+#else
+	else
+	  paxwarn (0, _("%s: metadata threads are not supported by this build;"
+			" ignoring option"),
+		   key == PARALLEL_META_THREADS_OPTION
+		   ? "--parallel-meta-threads" : "--parallel-max-meta-threads");
+#endif
+#else
+	paxwarn (0, _("parallel extraction is not supported by this build;"
+		      " extracting sequentially"));
+#endif
+      }
       break;
 
     case DELETE_OPTION:

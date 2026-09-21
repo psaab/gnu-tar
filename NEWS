@@ -3,6 +3,48 @@ Please send GNU tar bug reports to <bug-tar@gnu.org>
 
 version 1.35.90 (git)
 
+* Parallel extraction with selectable threading
+
+On GNU/Linux, when tar is built with liburing, extraction (-x) can keep
+many filesystem operations in flight.  By default, the engine creates
+files, directories and links and writes file data through io_uring using
+a single application thread; timestamps, ownership and permissions are
+restored synchronously.  Configure with --with-pthreads to select an
+alternative engine with I/O, writer and adaptive metadata worker threads.
+The default, also selected by --without-pthreads, creates no application
+worker threads; the kernel can still use io-wq workers.
+
+Members that need the ordinary code path (sparse files, link placeholders,
+dump directories) and runs using --to-stdout, --to-command, xattrs/ACLs/SELinux,
+incremental archives, --backup, --interactive, --keep-newer-files,
+--dereference, --recursive-unlink, --unlink-first, multi-volume
+archives or --one-top-level are extracted sequentially as before.
+So is --overwrite: it writes existing files in place, and two names in
+the destination may be hard links to one inode, which no ordering of
+names can serialize.  With --absolute-names, even relative member names
+are extracted sequentially, since absolute and relative names may
+denote the same object.
+Members whose parent paths cross a symbolic link or mount boundary are
+extracted one at a time in archive order, since different names may then
+refer to the same object.  An ordinary pre-existing directory does not
+by itself force serialization.  Changing -C destinations waits for
+earlier members to finish.
+New options: --parallel, --no-parallel and --parallel-open-files=N;
+see the manual.  The --parallel-meta-threads=N and
+--parallel-max-meta-threads=N options tune the metadata pool in builds
+configured with --with-pthreads.  Otherwise they are hidden from help
+and usage, but still recognized and checked for valid positive values.
+With the thread-free engine, each explicit use warns that metadata
+threads are unavailable and ignores the setting.
+
+Configure with --with-liburing[=DIR] to prefer static liburing linking,
+falling back to shared linking when necessary; --without-liburing builds
+tar without either engine.  Explicit --with-pthreads requires usable
+liburing and pthreads; configure fails if either is unavailable, including
+when --without-liburing is also given.  Builds without an engine hide the
+parallel options from help and usage; explicit requests to enable or tune
+parallel extraction warn and leave extraction sequential.
+
 * New manual section "Reproducibility", for reproducible tarballs.
 
 * New options: --set-mtime-command and --set-mtime-format
@@ -45,6 +87,9 @@ option.
    version to the next.
 
 * Bug fixes
+
+** Directory attributes are no longer mixed between -C destinations
+   containing the same member name.  This also fixes sequential extraction.
 
 ** When extracting, tar no longer follows symbolic links to targets
    outside the working directory.

@@ -395,6 +395,14 @@ extern bool show_transformed_names_option;
    timestamps from archives with an unusual member order. It is automatically
    set for incremental archives. */
 extern bool delay_directory_restore_option;
+
+/* Parallel extraction.  -1 = auto, 0 = off, 1 = on.  */
+extern int parallel_option;
+extern idx_t parallel_open_files_option;
+#if TAR_PARALLEL && TAR_PARALLEL_THREADS
+extern idx_t parallel_meta_threads_option;
+extern idx_t parallel_max_meta_threads_option;
+#endif
 
 /* Declarations for each module.  */
 
@@ -558,6 +566,68 @@ void verify_volume (void);
 extern dev_t root_device;
 
 void extr_init (void);
+
+/* Modules parallel.c and parallel-threads.c: the io_uring engines.
+   Configure selects exactly one; application threads are opt-in.
+   Built only if configure found liburing (TAR_PARALLEL); otherwise the
+   hooks below are no-ops and extraction is always sequential.  */
+
+#if TAR_PARALLEL
+
+struct parallel_dirstat
+{
+  char const *name;
+  idx_t change_dir;
+  uintmax_t order;
+  int wdfd;			/* filled in by parallel_apply_dirstats */
+  mode_t mode, current_mode, current_mode_mask;
+  uid_t uid;
+  gid_t gid;
+  struct timespec atime, mtime;
+  bool interdir;
+  int atflag;
+};
+
+extern bool parallel_active;
+
+void parallel_init (void);
+bool parallel_extract_member (char *file_name, char typeflag);
+void parallel_barrier (void);
+void parallel_finish (void);
+void parallel_shutdown (void);
+void parallel_apply_dirstats (struct parallel_dirstat *arr, idx_t n);
+
+/* Accessors into extract.c and misc.c for the engine.  */
+mode_t parallel_current_umask (void);
+mode_t parallel_newdir_umask (void);
+bool parallel_we_are_root (void);
+mode_t parallel_safe_dir_mode (struct stat const *st);
+void parallel_record_directory (char const *file_name, struct stat const *st,
+				struct timespec atime, struct timespec mtime,
+				mode_t current_mode, mode_t current_mode_mask,
+				mode_t mode, int atflag, idx_t change_dir,
+				struct stat const *real_st);
+bool parallel_dir_is_interdir (char const *file_name, idx_t change_dir);
+void parallel_forget_directory (char const *file_name, idx_t change_dir);
+void parallel_check_time (char const *file_name, struct timespec t);
+int chdir_current_fd (void);
+int chdir_fd_of (idx_t i);
+
+#else /* !TAR_PARALLEL */
+
+enum { parallel_active = false };
+
+static inline void parallel_init (void) {}
+static inline bool
+parallel_extract_member (char *file_name _GL_UNUSED, char typeflag _GL_UNUSED)
+{
+  return false;
+}
+static inline void parallel_barrier (void) {}
+static inline void parallel_finish (void) {}
+static inline void parallel_shutdown (void) {}
+
+#endif
 bool create_dir (char *dir);
 void extract_archive (void);
 void extract_finish (void);

@@ -37,7 +37,8 @@ if PU_RMT_COND
   RMT_8=rmt.8
 endif
 
-EXTRA_DIST = gendocs_template mastermenu.el texify.sed untabify.el rmt.8
+EXTRA_DIST = gendocs_template mastermenu.el texify.sed untabify.el rmt.8 \
+ parallel-extract-nothreads.md
 
 # The rendering level is anyone of PUBLISH, DISTRIB or PROOF.
 # Just call 'make RENDITION=PROOF [target]' if you want PROOF rendition.

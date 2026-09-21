@@ -1,0 +1,96 @@
+# Process this file with autom4te to create testsuite. -*- Autotest -*-
+
+# Test suite for GNU tar.
+# Copyright 2026 Free Software Foundation, Inc.
+
+# This file is part of GNU tar.
+
+# GNU tar is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+# GNU tar is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# A submission error leaves both submitted operations and queued SQEs
+# intact.  In particular, treating them as completed can free jobs whose
+# names the kernel will read on the next submission.  Exercise transient
+# and persistent resource shortages, and an unrecoverable wait error.
+# Fault injection is optional, as is runtime io_uring support.
+
+AT_SETUP([parallel extraction handles ring submission failures])
+AT_KEYWORDS([extract parallel parallel-failure])
+
+AT_TAR_CHECK([
+AT_TIMEOUT_PREREQ
+tar cf empty -T /dev/null
+tar --parallel -xf empty 2>probe.err || AT_SKIP_TEST
+test ! -s probe.err || AT_SKIP_TEST
+strace -qq -o probe.trace -e trace=io_uring_enter \
+  -e inject=io_uring_enter:error=ENOMEM:when=2 true 2>/dev/null \
+  || AT_SKIP_TEST
+
+mkdir src src/d recovered
+genfile --length 1048576 --file src/d/f
+ln src/d/f src/d/h || AT_SKIP_TEST
+tar cf archive -C src d || exit 1
+
+# A single resource shortage is retryable and must not change the output.
+timeout 15 strace -qq -f -o retry.trace -e trace=io_uring_enter \
+  -e inject=io_uring_enter:error=ENOMEM:when=2 \
+  tar --parallel -xf archive -C recovered 2>retry.err || exit 1
+grep -q '(INJECTED)' retry.trace || exit 1
+test ! -s retry.err || exit 1
+cmp src/d/f recovered/d/f || exit 1
+cmp src/d/h recovered/d/h || exit 1
+test "`ls -i recovered/d/f | sed 's/ .*//'`" = \
+     "`ls -i recovered/d/h | sed 's/ .*//'`" || exit 1
+
+# Unexpected errors must terminate with tar's failure status, without
+# double-freeing a job or waiting forever.
+# Persistent ENOMEM must likewise terminate after bounded retries.
+for fault in EIO ENOMEM; do
+  mkdir failed-$fault
+  timeout 15 strace -qq -f -o $fault.trace -e trace=io_uring_enter \
+    -e inject=io_uring_enter:error=$fault:when=2+ \
+    tar --parallel -xf archive -C failed-$fault 2>$fault.err
+  test $? -eq 2 || exit 1
+  grep -q '(INJECTED)' $fault.trace || exit 1
+  grep -q 'io_uring .* failed:' $fault.err || exit 1
+  grep -q 'Error is not recoverable' $fault.err || exit 1
+  test "`wc -l < $fault.err`" -eq 2 || exit 1
+done
+echo ok
+
+# A submission failure while extracting FIFO input must terminate
+# promptly even while the producer keeps the pipe open.  The main
+# thread observes the error when submitting, not during a blocked read.
+mkfifo pipe || AT_SKIP_TEST
+(cat archive; exec sleep 30) > pipe &
+producer=$!
+mkdir piped
+timeout 20 strace -qq -f -o pipe.trace -e trace=io_uring_enter \
+  -e inject=io_uring_enter:error=EIO:when=2+ \
+  tar --parallel -xf pipe -C piped 2>pipe.err
+status=$?
+kill $producer 2>/dev/null
+wait $producer 2>/dev/null
+test $status -eq 2 || { echo "status $status"; cat pipe.err; exit 1; }
+grep -q '(INJECTED)' pipe.trace || exit 1
+grep -q 'io_uring .* failed:' pipe.err || exit 1
+grep -q 'Error is not recoverable' pipe.err || exit 1
+echo pipe ok
+],
+[0],
+[ok
+pipe ok
+],
+[], [], [], [gnu])
+
+AT_CLEANUP

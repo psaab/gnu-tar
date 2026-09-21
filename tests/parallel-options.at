@@ -1,0 +1,127 @@
+# Process this file with autom4te to create testsuite. -*- Autotest -*-
+
+# Test suite for GNU tar.
+# Copyright 2026 Free Software Foundation, Inc.
+
+# This file is part of GNU tar.
+
+# GNU tar is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+# GNU tar is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# Help describes build capabilities, not whether this kernel permits
+# io_uring.  Probe creation mode so the engine is never initialized.
+
+m4_define([AT_PARALLEL_METADATA_WARNING],
+[tar: --$1: metadata threads are not supported by this build; ignoring option])
+
+m4_define([AT_PARALLEL_OPTIONS_PROBE],[
+tar --parallel -cf probe.tar -T /dev/null 2>probe.err || exit 1
+supported=yes
+if test -s probe.err; then
+  grep -q 'parallel extraction is not supported by this build' probe.err \
+    || exit 1
+  supported=no
+fi
+
+tar --parallel-meta-threads=1 -cf /dev/null -T /dev/null \
+  2>threads-probe.err || exit 1
+threads_supported=no
+if test "$supported" = no; then
+  cmp probe.err threads-probe.err || exit 1
+elif test -s threads-probe.err; then
+  echo 'AT_PARALLEL_METADATA_WARNING([parallel-meta-threads])' > threads.expected
+  cmp threads.expected threads-probe.err || exit 1
+else
+  threads_supported=yes
+fi
+])
+
+AT_SETUP([parallel options reflect build capabilities])
+AT_KEYWORDS([options parallel parallel-options])
+
+AT_TAR_CHECK([
+AT_PARALLEL_OPTIONS_PROBE
+for display in --help --usage; do
+  tar "$display" > display.out || exit 1
+  for option in parallel no-parallel parallel-open-files; do
+    if grep -F -- "--$option" display.out > /dev/null; then
+      test "$supported" = yes || exit 1
+    else
+      test "$supported" = no || exit 1
+    fi
+  done
+  for option in parallel-meta-threads parallel-max-meta-threads; do
+    if grep -F -- "--$option" display.out > /dev/null; then
+      test "$threads_supported" = yes || exit 1
+    else
+      test "$threads_supported" = no || exit 1
+    fi
+  done
+done
+
+# Hidden options remain recognized so scripts can disable the engine
+# without first inspecting the build configuration.
+tar --no-parallel -xf probe.tar 2>disabled.err || exit 1
+test ! -s disabled.err || exit 1
+echo ok
+],
+[0],
+[ok
+],
+[], [], [], [gnu])
+
+AT_CLEANUP
+
+AT_SETUP([parallel numeric options reject invalid arguments])
+AT_KEYWORDS([options parallel parallel-options])
+
+AT_TAR_CHECK([
+AT_PARALLEL_OPTIONS_PROBE
+: > combined.expected
+for option in parallel-open-files parallel-meta-threads \
+              parallel-max-meta-threads; do
+  for value in 0 -1 '' \
+    999999999999999999999999999999999999999999999999999999999999; do
+    tar "--$option=$value" -cf /dev/null -T /dev/null \
+      >invalid.out 2>invalid.err
+    test $? -eq 2 || exit 1
+    test ! -s invalid.out || exit 1
+    grep -q ': Invalid number$' invalid.err || exit 1
+    grep -q 'not supported by this build' invalid.err && exit 1
+  done
+
+  # Supported tuning is silent.  Thread-free builds warn once for each
+  # thread option; engine-less builds retain the same diagnostic as
+  # --parallel for every tuning option.
+  tar "--$option=1" -cf /dev/null -T /dev/null 2>valid.err || exit 1
+  if test "$option" = parallel-open-files || test "$supported" = no \
+     || test "$threads_supported" = yes; then
+    cmp probe.err valid.err || exit 1
+  else
+    echo "AT_PARALLEL_METADATA_WARNING([$option])" > expected.err
+    cmp expected.err valid.err || exit 1
+  fi
+  cat valid.err >> combined.expected
+done
+tar --parallel-open-files=1 --parallel-meta-threads=1 \
+  --parallel-max-meta-threads=1 -cf /dev/null -T /dev/null \
+  2>combined.err || exit 1
+cmp combined.expected combined.err || exit 1
+echo ok
+],
+[0],
+[ok
+],
+[], [], [], [gnu])
+
+AT_CLEANUP

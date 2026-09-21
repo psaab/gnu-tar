@@ -1089,6 +1089,30 @@ idx_t chdir_current;
    valid until the next invocation of chdir_do.  */
 static int chdir_fd = AT_FDCWD;
 
+#if TAR_PARALLEL
+/* Return the directory file descriptor of the current working
+   directory as set up by chdir_do (possibly AT_FDCWD).  */
+int
+chdir_current_fd (void)
+{
+  chdir_do (chdir_current, false);
+  return chdir_fd;
+}
+
+/* Return the directory file descriptor for directory index I without
+   leaving the current directory changed.  */
+int
+chdir_fd_of (idx_t i)
+{
+  idx_t saved = chdir_current;
+  chdir_do (i, false);
+  int fd = chdir_fd;
+  if (saved != i)
+    chdir_do (saved, false);
+  return fd;
+}
+#endif /* TAR_PARALLEL */
+
 /* Change to directory I, in a virtual way.  This does not actually
    invoke chdir; it merely sets chdir_fd to an int suitable as the
    first argument for openat, etc.  If I is 0, change to the initial
@@ -1097,6 +1121,11 @@ static int chdir_fd = AT_FDCWD;
 void
 chdir_do (idx_t i, bool create)
 {
+  /* A destination can itself be a directory from an earlier archive
+     member.  Wait before resolving it, not merely before dispatching
+     the next member into it.  */
+  if (i != chdir_current)
+    parallel_barrier ();
   struct wd *curr = &wd[i];
   int fd = curr->fd;
   bool one_top_level = !!one_top_level_dir;

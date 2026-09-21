@@ -46,6 +46,15 @@ tar_SOURCES = \
  warning.c\
  xattrs.c
 
+if TAR_PARALLEL
+if TAR_PARALLEL_THREADS
+tar_SOURCES += parallel-threads.c
+else
+tar_SOURCES += parallel.c
+endif
+endif
+EXTRA_tar_SOURCES = parallel.c parallel-threads.c
+
 AM_CPPFLAGS = -I$(top_srcdir)/gnu -I../ -I../gnu -I$(top_srcdir)/lib -I../lib
 AM_CFLAGS = $(WARN_CFLAGS) $(WERROR_CFLAGS)
 
